@@ -1,4 +1,5 @@
 #include "photo.h"
+#include "config.h"          // the board header may override PH_MAXW / PH_MAXH (round panels)
 #include <mutex>
 #include <string.h>
 #include <stdio.h>
@@ -7,8 +8,15 @@
 #include <esp_heap_caps.h>
 #endif
 
+// Largest photo shown, in px. The image proxy resizes to this and the UI places the photo from
+// the real decoded size. A board header can override both: on a round panel the photo's top
+// corners must stay inside the glass (see board_knob_18.h).
+#ifndef PH_MAXW
 #define PH_MAXW 232
+#endif
+#ifndef PH_MAXH
 #define PH_MAXH 156
+#endif
 
 static std::mutex  s_m;
 static lv_color_t *s_buf = nullptr;

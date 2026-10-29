@@ -145,10 +145,25 @@ static void fold_ascii(char *s) {
 // Idle clock up (radar_view scene step >= 1): the HUD, zoom button and card make way for it.
 static bool s_clockUp = false;
 
+// Knob selection debounce (fork-only). While the ring is turning the detail card stays hidden, and
+// its route/photo lookups are not started for every plane the ring passes; the card appears once
+// the ring has been still for KNOB_CARD_DELAY_MS. refresh_card() honours s_cardHold, so the
+// periodic data poll cannot show the card early. A tap or a list pick is deliberate: it cancels
+// the hold and shows the card at once.
+#ifndef KNOB_CARD_DELAY_MS
+#define KNOB_CARD_DELAY_MS 500
+#endif
+static bool        s_cardHold = false;
+static lv_timer_t *s_cardHoldTimer = nullptr;
+static void card_hold_cancel(void) {
+    s_cardHold = false;
+    if (s_cardHoldTimer) lv_timer_pause(s_cardHoldTimer);
+}
+
 static void refresh_card(void) {
     AcInfo in;
     const bool sel = radar::selected(in);
-    if (s_clockUp || !sel) {
+    if (s_clockUp || s_cardHold || !sel) {
         lv_obj_add_flag(s_card, LV_OBJ_FLAG_HIDDEN);
         if (s_photo)       lv_obj_add_flag(s_photo, LV_OBJ_FLAG_HIDDEN);
         if (s_photoCredit) lv_obj_add_flag(s_photoCredit, LV_OBJ_FLAG_HIDDEN);
@@ -398,6 +413,7 @@ static void radar_clicked_cb(lv_event_t *e) {
     if (!indev) return;
     lv_point_t p;
     lv_indev_get_point(indev, &p);
+    card_hold_cancel();                        // a tap is deliberate: show the card at once
     radar::select(radar::hitTest(p.x, p.y));   // hit -> select; miss -> clear
     refresh_card();
 }
@@ -531,6 +547,7 @@ static void list_press_cb(lv_event_t *e) {
 static void list_tap_cb(lv_event_t *e) {
     (void)e;
     if (!s_listPressHex[0] || !radar::selectHex(s_listPressHex)) return;   // left the feed mid-press
+    card_hold_cancel();                           // a list pick is deliberate: show the card at once
     refresh_card();
     lv_obj_set_tile_id(s_tv, 0, 0, LV_ANIM_ON);   // jump back to the radar
 }
@@ -769,8 +786,27 @@ void ui_set_weather_forecast(bool forecast) {
 // Rebuild whichever of list/stats is currently on screen (called on poll and on swipe).
 static void (*s_viewChangedCb)(int) = nullptr;
 void ui_set_view_changed_cb(void (*cb)(int idx)) { s_viewChangedCb = cb; }
-// Selection changed from outside a tap (the knob): same follow-up the tap handler does after select().
-void ui_refresh_selection(void) { if (s_card) refresh_card(); }
+// The knob changed the radar selection (fork-only). Hide the card now and (re)start the debounce:
+// every further click restarts the KNOB_CARD_DELAY_MS wait, and the card shows only once the ring
+// has been still for that long. The selected plane stays highlighted on the scope meanwhile.
+static void card_hold_expired(lv_timer_t *t) {
+    s_cardHold = false;
+    lv_timer_pause(t);
+    refresh_card();                      // shows the card for whatever is selected now (or nothing)
+}
+void ui_knob_selection_changed(void) {
+    if (!s_card) return;
+    s_cardHold = true;
+    refresh_card();                      // hold is set, so this hides the card (and starts no lookups)
+    if (!s_cardHoldTimer) {
+        s_cardHoldTimer = lv_timer_create(card_hold_expired, KNOB_CARD_DELAY_MS, nullptr);
+    } else {
+        lv_timer_set_period(s_cardHoldTimer, KNOB_CARD_DELAY_MS);
+        lv_timer_resume(s_cardHoldTimer);
+    }
+    lv_timer_reset(s_cardHoldTimer);     // count the delay from THIS click
+}
+bool ui_card_visible(void) { return s_card && !lv_obj_has_flag(s_card, LV_OBJ_FLAG_HIDDEN); }
 
 // ---------------------------------------------------------------- idle clock
 // radar_view's scene steps. From the first one the HUD, the zoom button and the card make

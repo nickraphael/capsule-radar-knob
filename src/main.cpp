@@ -1228,6 +1228,11 @@ void setup() {
     rtc_seed_clock();                   // offline clock/date from the PCF85063
     knob_begin();                       // rotary knob sampler (no-op on boards without one)
     haptic_begin();                     // DRV2605L (no-op on boards without one)
+#if defined(PIN_ENC_A)
+    // Which build is this? States what this firmware was compiled with, so a stale flash is obvious.
+    Serial.printf("[knob] built with: card delay %d ms, photo max %dx%d px\n",
+                  (int)KNOB_CARD_DELAY_MS, (int)PH_MAXW, (int)PH_MAXH);
+#endif
     // The system clock may be RTC-seeded (looks valid, might drift). Only a real SNTP
     // sync may write the RTC back — the callback flags each sync, the 5 s tick (core 1)
     // does the I2C write, at most hourly.
@@ -1512,13 +1517,26 @@ void loop() {
     // and sends the idle clock away exactly like a touch does (the idle block below); that first
     // click ONLY wakes: the selection does not move, as with touch. Radar view only.
     {
+        static bool holdPending = false;     // a knob selection is waiting for its card to appear
+        static uint32_t lastSelMs = 0;
+        // Measure the debounce on the device: one log line, when the card appears after knob use.
+        if (holdPending) {
+            if (ui_card_visible()) {
+                Serial.printf("[knob] card shown %lu ms after the last click\n", (unsigned long)(millis() - lastSelMs));
+                holdPending = false;
+            } else if (millis() - lastSelMs > 8000) {
+                holdPending = false;         // landed on "none" or the plane left the feed: no card to wait for
+            }
+        }
         const int clicks = knob_take();
         if (clicks != 0) {
             const bool wasIdle = g_idle || radar::clockRequested();    // state BEFORE this click
             display::noteActivity();
             if (!wasIdle && ui_sweep_visible() && radar::cycleSelection(clicks)) {
-                ui_refresh_selection();
+                ui_knob_selection_changed();     // hides the card; it returns after the ring is still for KNOB_CARD_DELAY_MS
                 haptic_tick();
+                holdPending = true;              // the measurement above logs when the card comes back
+                lastSelMs = millis();
             }
         }
     }

@@ -6,7 +6,8 @@ void ui_create(void);            // build the whole UI on the active screen
 bool ui_sweep_visible(void);     // radar tile shown and not mid-swipe (sweep compositor)
 int  ui_sweep_masks(int16_t out[][5], int max);   // logical x1,y1,x2,y2,radius: rounded boxes the sweep must not paint over
 void ui_on_data_updated(void);   // refresh card/list/stats after radar::update()
-void ui_refresh_selection(void); // refresh the detail card after the radar selection changed outside a tap (the knob)
+void ui_knob_selection_changed(void); // the knob changed the radar selection: hide the detail card now, show it after KNOB_CARD_DELAY_MS of stillness
+bool ui_card_visible(void);      // the aircraft detail card is on screen (used to measure the knob debounce)
 void ui_show_view(int idx);      // 0 = radar, 1 = list, 2 = stats, 3 = weather
 void ui_set_view_changed_cb(void (*cb)(int idx));  // fired on swipe — lets main remember the last view
 void ui_set_status(bool wifiUp, bool feedOk, int rssi, const char *clock);  // HUD: signal bars (count=RSSI, colour: red=down, amber=stale feed, white=ok) + clock

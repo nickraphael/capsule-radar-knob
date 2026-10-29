@@ -83,6 +83,19 @@
 // Tune by feel: 4/5/6 = Sharp Click 100/60/30%, 7/8/9 = Soft Bump 100/60/30%, 1/2/3 = Strong Click.
 #define HAPTIC_TICK_EFFECT  5
 
+// While the knob is turning, the aircraft detail card stays hidden; it appears once the ring has
+// been still for this long (ms). The selected plane stays highlighted on the scope meanwhile.
+#define KNOB_CARD_DELAY_MS  1000
+
+// ---------- Aircraft photo size ----------
+// The largest photo shown (px); the image proxy resizes to it. The photo sits above the detail card
+// with its bottom edge 28 px above the screen centre, so its TOP corners are the points that reach
+// the glass: at 176x117 the worst-case corner is about 170 px from the centre (the glass radius is
+// 180). The 466 px boards' 232x156 put that corner about 208 px out, which runs off a round 360.
+// Smaller also means less to download and decode, and a smaller PSRAM buffer.
+#define PH_MAXW             176
+#define PH_MAXH             117
+
 // ---------- Battery sense ----------
 // GPIO 1 (ADC1 channel 0) behind a divide-by-two divider; 12 dB attenuation;
 // V = raw * 3.3 / 4096 * 2. MEASURED: about 4.7 V on USB (the USB-fed rail), 4.16 V on battery.
