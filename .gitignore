@@ -25,3 +25,6 @@ secrets.h
 /managed_components/
 /sdkconfig.defaults
 /sdkconfig.esp32-s3-lcd-21
+
+# Python venv for esptool (Docker build workflow, see README)
+.venv/

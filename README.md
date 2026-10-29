@@ -111,6 +111,89 @@ pio device monitor -b 115200                  # serial log
 The boot log names the board it was built for (`Capsule Radar boot  fw … board …`) — worth checking first if the screen stays black, since the wrong board's image drives the wrong pins.
 On first flash you may need to hold **BOOT** then tap **RESET**. After flashing, on first boot connect your phone to the **`CapsuleRadar-Setup`** WiFi and enter your home network — real aircraft appear within seconds.
 
+## Building on a locked-down Windows machine (Docker)
+
+*Fork-specific.* Some managed Windows laptops block unsigned executables, so PlatformIO's GCC, `pip.exe` and the VS Code PlatformIO installer fail with "Access is denied". The workaround: compile inside a Linux container, where that policy doesn't apply, and run only the flashing on Windows (esptool is pure Python, run through the signed `python.exe`). If your machine has no such restriction, skip this section and use `pio run -e <env> -t upload` as above.
+
+> **Status:** the knob env (`esp32-s3-knob-18`, set as `KNOB_ENV` in `settings.cmd`) is **not in `platformio.ini` yet**; it arrives with the port. Until then, `build.cmd` and `merge.cmd` accept any existing env as an argument (for example `.\build.cmd esp32-s3-amoled-175`), which is how to test the toolchain. `deploy.cmd` refuses to flash anything that wasn't built for `KNOB_ENV`.
+
+### Prerequisites
+
+1. **Docker Desktop**, running. `docker --version` and `docker info` must both work.
+2. **Python 3.12** on PATH. Check: `python --version`
+3. A USB-C **data** cable (charge-only cables show no COM port).
+4. A 2.4 GHz WiFi network for the device. The ESP32-S3 has no 5 GHz radio.
+
+### One-time setup
+
+1. Create a Python environment for esptool. Use `python -m`, not `pip.exe`, which is blocked on managed laptops:
+
+   ```
+   python -m venv .venv
+   .venv\Scripts\python.exe -m pip install esptool
+   ```
+
+2. Edit `settings.cmd`: set `PORT` to your COM port (Device Manager > Ports), and check `KNOB_ENV`.
+
+3. **The board has two MCUs (ESP32-S3 and ESP32-U4) behind one USB-C port, and the plug orientation selects which one you reach.** Confirm you are talking to the S3 (read-only, writes nothing):
+
+   ```
+   .venv\Scripts\python.exe -m esptool --chip esp32s3 --port COM3 flash-id
+   ```
+
+   Expect "ESP32-S3" and a 16 MB flash. If the port isn't found, or esptool reports a different chip, unplug, flip the plug 180 degrees and try again. Only ever flash the S3.
+
+4. **Back up the factory firmware before the first flash** (the S3's 16 MB, about a minute):
+
+   ```
+   .venv\Scripts\python.exe -m esptool --chip esp32s3 --port COM3 read-flash 0 0x1000000 factory_backup_s3.bin
+   ```
+
+   Restore with `write-flash 0x0 factory_backup_s3.bin`. `*.bin` is git-ignored; keep a copy outside the project folder too. Waveshare also publishes the factory BIN files (see the wiki's Resources section), which restore both chips.
+
+### Build, merge, flash
+
+With Docker running, from PowerShell in the project folder, in order:
+
+```
+.\build.cmd
+.\merge.cmd
+.\deploy.cmd
+```
+
+Or run all three with `.\full_deploy.cmd`; it stops at the first step that fails. Each script also stops with a message if the step before it failed.
+
+- **`build.cmd`** compiles in a container. The first run is slow: it builds a small image from `Dockerfile` (Python, git, PlatformIO, esptool), then downloads the platform, toolchain and libraries. The toolchain lives in the `pio_cache_knob` Docker volume; libraries and build output live in `pio_work_knob`, because scanning thousands of library files across the Windows bind mount makes builds very slow. Only the three images needed for merging are copied back to `.pio/build/<env>/`. Check the output ends in `BUILD OK`. Force a clean rebuild with `docker volume rm pio_work_knob`.
+- **`merge.cmd`** merges bootloader, partition table, `boot_app0` and the app into one `merged.bin` flashed at `0x0`, and records which env it came from.
+- **`deploy.cmd`** refuses to flash if `merged.bin` is older than `firmware.bin` or wasn't built for `KNOB_ENV`, then flashes the S3 (this overwrites everything on it). Close any serial monitor first.
+
+If flashing can't connect: flip the USB-C plug 180 degrees. Still failing: hold the S3's BOOT button, power the board on again, release, and run `deploy.cmd` again. After a successful flash, power-cycle the board; on first boot join the `CapsuleRadar-Setup` WiFi as usual.
+
+The scripts are plain `.cmd` files, so PowerShell execution policy doesn't affect them (`deploy.cmd` uses one inline `powershell -Command` for the timestamp check, which isn't a script file).
+
+> The most common mistake is flashing a stale `merged.bin` because the build or merge was skipped or failed. `deploy.cmd` guards against the obvious case, but still check the build ended in `BUILD OK`.
+
+### Assumptions to verify on the first real knob build
+
+- `scripts/docker_merge.sh` keeps the flash mode, frequency and size from the bootloader the build produced (DIO, 80 MHz, 16 MB), even though `platformio.ini` says `flash_mode = qio`: PlatformIO's espressif32 builder maps `qio` to `dio` for the image header and uploads with `--flash_mode dio`, and upstream's `scripts/build_webflasher.sh` merges with `dio` too. Checked on the 1.75 build: `merged.bin` header reads DIO / 80m / 16MB.
+- It also assumes the `default_16MB.csv` layout (otadata `0xe000`, app `0x10000`). A different partition file needs different offsets.
+- `boot_app0.bin` is located by searching the PlatformIO package cache rather than hardcoded. Verified against the pioarduino platform: it resolves to `/root/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin`.
+- The upstream flags assume native USB CDC for serial. How the knob routes USB to the S3 (UART bridge or native) is unconfirmed; check the schematic before relying on serial output.
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `docker: error during connect ... dockerDesktopLinuxEngine` | Docker Desktop isn't running. Start it, wait for the engine, check `docker info` |
+| Build fails fetching a library from GitHub | The build image needs `git`; the `Dockerfile` installs it. If you made your own image, add git |
+| Image build fails: apt "Clearsigned file isn't valid, got 'NOSPLIT'" or "does the network require authentication?" | The network intercepts plain HTTP (port 80). The `Dockerfile` switches apt to HTTPS for this reason; keep that line |
+| Build tries to compile every env / the SDL simulator | Something ran `pio run` without `-e`. Always go through `build.cmd` |
+| Build is slow at "Scanning dependencies" | Libraries must live in the `pio_work_knob` volume, not the Windows folder (`build.cmd` does this) |
+| `deploy.cmd`: "Refusing to flash" | `merged.bin` was built for a different env than `KNOB_ENV`. Rebuild and re-merge the knob env |
+| esptool "Failed to connect", or no COM port | Flip the USB-C plug, close serial monitors, or use the BOOT method above |
+| esptool says the chip isn't ESP32-S3 | You're connected to the ESP32-U4. Flip the plug |
+| `pip.exe` / `gcc.exe` "Access is denied" | Managed-laptop policy; this Docker workflow is the way around it |
+
 ## Flash from your browser (no toolchain)
 
 Makers can flash without installing anything using **ESP Web Tools** (Chrome or Edge on desktop):
