@@ -33,3 +33,6 @@ secrets.h
 # license file, so never commit this; regenerate it from the demo instead.
 bringup/st77916_knob_init.h
 src/boards/st77916_knob_init.h
+
+# Local project notes: they hold local paths and device identifiers, so they stay out of the repo
+context.txt
