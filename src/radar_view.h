@@ -55,6 +55,11 @@ void select(int idx);
 // place. False (selection unchanged) when that aircraft has left the feed.
 bool selectHex(const char* hex);
 bool selected(AcInfo& out);                 // false if nothing selected/visible
+// Step the selection around the scope by `steps` positions (knob input): > 0 clockwise, < 0
+// anticlockwise, any size. The ring is the aircraft the scope draws, clockwise by on-screen angle
+// (nearer first on a tie), plus a "none" stop at 12 o'clock, so a full turn passes through
+// nothing selected. Returns true if the selection changed.
+bool cycleSelection(int steps);
 
 // Snapshot access for the list / stats views.
 int  count();

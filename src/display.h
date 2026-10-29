@@ -21,6 +21,11 @@ void setBrightness(uint8_t v);
 // ms since the last touch (LVGL inactivity timer) — for idle auto-dim.
 uint32_t inactiveMs();
 
+// Count something other than a touch (a knob click) as activity: restarts the inactivity time,
+// so main.cpp's idle logic wakes the screen and sends the idle clock away, as it does for a touch.
+// Not available on the LCD 2.1 backend; only the knob build calls it.
+void noteActivity();
+
 // Rotate the whole UI clockwise by an arbitrary number of degrees (normalized to
 // 0..359), e.g. to compensate for any enclosure/mounting angle. Cardinal rotations
 // keep their optimized flush paths; other angles use a PSRAM framebuffer. Touch input

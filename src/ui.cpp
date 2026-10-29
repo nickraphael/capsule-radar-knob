@@ -769,6 +769,8 @@ void ui_set_weather_forecast(bool forecast) {
 // Rebuild whichever of list/stats is currently on screen (called on poll and on swipe).
 static void (*s_viewChangedCb)(int) = nullptr;
 void ui_set_view_changed_cb(void (*cb)(int idx)) { s_viewChangedCb = cb; }
+// Selection changed from outside a tap (the knob): same follow-up the tap handler does after select().
+void ui_refresh_selection(void) { if (s_card) refresh_card(); }
 
 // ---------------------------------------------------------------- idle clock
 // radar_view's scene steps. From the first one the HUD, the zoom button and the card make

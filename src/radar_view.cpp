@@ -163,6 +163,7 @@ struct AcDraw {
     float      altFt;
     bool       onGround;
     float      vsFpm, gsKt, distKm, bearingDeg;
+    float      scrDeg;         // on-screen angle, degrees clockwise from 12 o'clock: bearing minus the scope rotation
     int        squawk;
     std::vector<lv_point_t> trail;
 };
@@ -1037,6 +1038,7 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
         d.gsKt = ac.gs;
         d.distKm = (float)distKm;
         d.bearingDeg = (float)brg;
+        d.scrDeg = (float)fmod(brg - s.rotationDeg + 720.0, 360.0);   // same angle projectToScreen() plots at
         d.squawk = ac.squawk;
         fmt_alt_txt(d.altTxt, sizeof(d.altTxt), ac.altBaro, ac.onGround);
 
@@ -1154,6 +1156,42 @@ bool selected(AcInfo &out) {
     for (const AcDraw &a : s_acs)
         if (s_selHex == a.hex) { fill_info(a, out); return true; }
     return false;
+}
+
+// Knob cycling. The ring is every aircraft the scope draws (for_each_drawn: the same list the
+// glyphs, the tap hit-test and the Orb wave use, so the knob can never land on something that is
+// not on screen), sorted clockwise by on-screen angle (nearer first when two share an angle), plus
+// one "none" stop at 12 o'clock. Turning clockwise from "none" lands on the first aircraft
+// clockwise from 12; counter-clockwise lands on the last. The selection is tracked by hex, as
+// everywhere else, so polls that reorder the feed do not disturb it.
+bool cycleSelection(int steps) {
+    if (steps == 0) return false;
+
+    struct Slot { size_t idx; long angKey; float dist; };
+    std::vector<Slot> ring;
+    for_each_drawn([&](size_t i, const AcDraw &ac) {
+        ring.push_back({ i, lroundf(ac.scrDeg * 10.0f), ac.distKm });   // 0.1 degree buckets: near-ties go by distance
+    });
+    std::sort(ring.begin(), ring.end(), [](const Slot &a, const Slot &b) {
+        return a.angKey != b.angKey ? a.angKey < b.angKey : a.dist < b.dist;
+    });
+
+    const int n = (int)ring.size();
+    const int stops = n + 1;                       // the aircraft, then "none"
+    int cur = n;                                   // nothing selected = the "none" stop
+    if (!s_selHex.empty()) {
+        for (int k = 0; k < n; ++k)
+            if (s_selHex == s_acs[ring[k].idx].hex) { cur = k; break; }
+    }
+    int next = (cur + steps) % stops;
+    if (next < 0) next += stops;
+
+    const std::string before = s_selHex;
+    if (next == n) s_selHex.clear();
+    else           s_selHex = s_acs[ring[next].idx].hex;
+    const bool changed = (s_selHex != before);
+    if (changed && s_acLayer) lv_obj_invalidate(s_acLayer);
+    return changed;
 }
 
 int count() { return (int)s_acs.size(); }

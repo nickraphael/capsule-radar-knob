@@ -165,7 +165,20 @@ Or run all three with `.\full_deploy.cmd`; it stops at the first step that fails
 
 - **`build.cmd`** compiles in a container. The first run is slow: it builds a small image from `Dockerfile` (Python, git, PlatformIO, esptool), then downloads the platform, toolchain and libraries. The toolchain lives in the `pio_cache_knob` Docker volume; libraries and build output live in `pio_work_knob`, because scanning thousands of library files across the Windows bind mount makes builds very slow. Only the three images needed for merging are copied back to `.pio/build/<env>/`. Check the output ends in `BUILD OK`. Force a clean rebuild with `docker volume rm pio_work_knob`.
 - **`merge.cmd`** merges bootloader, partition table, `boot_app0` and the app into one `merged.bin` flashed at `0x0`, and records which env it came from.
-- **`deploy.cmd`** refuses to flash if `merged.bin` is older than `firmware.bin` or wasn't built for `KNOB_ENV`, then flashes the S3 (this overwrites everything on it). Close any serial monitor first.
+- **`deploy.cmd`** refuses to flash if `merged.bin` is older than `firmware.bin` or wasn't built for `KNOB_ENV`, then flashes the S3. **This overwrites everything on it, including the saved WiFi credentials and settings** (location, theme, units), so you redo the WiFi setup afterwards. Close any serial monitor first.
+
+#### Keeping WiFi and settings: `--keep-wifi`
+
+The full image also rewrites the settings area. For everyday iteration, flash only the app instead:
+
+```
+.\build.cmd
+.\deploy.cmd --keep-wifi
+```
+
+or in one go, `.\full_deploy.cmd --keep-wifi` (build, then flash the app; there is no merge step). It writes just `firmware.bin` at `0x10000` (the app0 slot), so the WiFi credentials, location and other saved settings survive. Both scripts also take an env name (`.\deploy.cmd --keep-wifi esp32-s3-knob-18-bringup`). `build.cmd` accepts the flag but ignores it with a note: compiling cannot touch settings, only flashing can.
+
+It carries the same wrong-board guard (only the knob envs), and `build.cmd` deletes the previous `firmware.bin` before building, so a failed build leaves nothing to flash by mistake. Two limits: the board must already carry a full image of this layout, so **do a plain `deploy.cmd` the first time**, and **again after any browser OTA update** (an app-only flash does not reset which OTA slot the bootloader picks).
 
 If flashing can't connect: flip the USB-C plug 180 degrees. Still failing: hold the S3's BOOT button, power the board on again, release, and run `deploy.cmd` again. After a successful flash, power-cycle the board; on first boot join the `CapsuleRadar-Setup` WiFi as usual.
 

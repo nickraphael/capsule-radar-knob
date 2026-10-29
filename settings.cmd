@@ -15,6 +15,9 @@ set "VOL_WORK=pio_work_knob"
 
 rem Flashing runs on Windows (not in Docker) through the venv Python.
 set "PYTHON=.venv\Scripts\python.exe"
+rem Where the app image sits in flash (the app0 slot of default_16MB.csv, also the factory layout).
+rem deploy.cmd --keep-wifi writes ONLY this image there, leaving the settings area (WiFi, location) alone.
+set "APP_OFFSET=0x10000"
 rem COM port of the S3 (plug orientation selects the chip and changes the port; COM4 was the S3).
 rem Override for one run with:  set PORT=COMx
 if not defined PORT set "PORT=COM4"

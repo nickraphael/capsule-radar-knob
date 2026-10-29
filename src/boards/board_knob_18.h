@@ -79,6 +79,9 @@
 // ---------- Haptics: DRV2605L ----------
 // Waveshare's setup: ERM mode, ERM open-loop, library 1, internal trigger.
 #define I2C_ADDR_HAPTIC     0x5A
+// Effect played on each knob click (library 1, the vendor's numbering): 5 = Sharp Click 60%.
+// Tune by feel: 4/5/6 = Sharp Click 100/60/30%, 7/8/9 = Soft Bump 100/60/30%, 1/2/3 = Strong Click.
+#define HAPTIC_TICK_EFFECT  5
 
 // ---------- Battery sense ----------
 // GPIO 1 (ADC1 channel 0) behind a divide-by-two divider; 12 dB attenuation;

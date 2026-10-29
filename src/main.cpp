@@ -28,6 +28,8 @@
 #include "battery.h"                 // AXP2101 battery gauge
 #include "rtc_pcf85063.h"            // PCF85063 RTC (offline clock + date)
 #include "audio.h"                   // ES8311 alert pings
+#include "knob.h"                    // rotary knob (fork-only; stubs on boards without one)
+#include "haptic.h"                  // DRV2605L haptic tick (fork-only; stubs on boards without one)
 #include <set>                       // audio: track which contacts are in range
 #include <string>
 #include <WiFiManager.h>             // captive portal
@@ -1224,6 +1226,8 @@ void setup() {
     setenv("TZ", g_tz.c_str(), 1); tzset();   // SAVED zone (not the Spain default): right clock before NTP
     rtc_begin();
     rtc_seed_clock();                   // offline clock/date from the PCF85063
+    knob_begin();                       // rotary knob sampler (no-op on boards without one)
+    haptic_begin();                     // DRV2605L (no-op on boards without one)
     // The system clock may be RTC-seeded (looks valid, might drift). Only a real SNTP
     // sync may write the RTC back — the callback flags each sync, the 5 s tick (core 1)
     // does the I2C write, at most hourly.
@@ -1501,6 +1505,24 @@ void loop() {
         faceDown.update(haveAz, az, touched, g_fdSleep);   // g_fdSleep: web toggle
         g_asleep = faceDown.asleep();   // applyBrightness() below: dark (0) also makes a touch only wake it
     }
+
+#if defined(PIN_ENC_A)
+    // Knob: each click steps the radar selection (clockwise = next around the scope, through a
+    // "none" stop), with a haptic tick. Any click counts as activity, so it wakes a dimmed screen
+    // and sends the idle clock away exactly like a touch does (the idle block below); that first
+    // click ONLY wakes: the selection does not move, as with touch. Radar view only.
+    {
+        const int clicks = knob_take();
+        if (clicks != 0) {
+            const bool wasIdle = g_idle || radar::clockRequested();    // state BEFORE this click
+            display::noteActivity();
+            if (!wasIdle && ui_sweep_visible() && radar::cycleSelection(clicks)) {
+                ui_refresh_selection();
+                haptic_tick();
+            }
+        }
+    }
+#endif
 
     // Idle: the clock, or the plain dim. Checked on every pass, so the touch that wakes the
     // radar sends the clock away at once. The clock needs the radar view on screen and a
