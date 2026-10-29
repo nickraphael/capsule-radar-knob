@@ -37,8 +37,8 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 #define WX_RADAR_REFRESH_MS 300000UL       // RainViewer frames update about every 5 minutes
 #define CLOUD_IMAGE_REFRESH_MS 600000UL    // EUMETSAT MTG cloud imagery; cache for 10 minutes
 
-// ---------- Screen geometry (AMOLED defaults; LCD 2.1 overrides below) ----------
-#if !defined(BOARD_LCD21)
+// ---------- Screen geometry (AMOLED defaults; LCD 2.1 and the knob override in their board header) ----------
+#if !defined(BOARD_LCD21) && !defined(BOARD_KNOB18)
 #define SCREEN_W            466
 #define SCREEN_H            466
 #define SCREEN_CX           233
@@ -175,6 +175,7 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 // default so an unflagged build behaves exactly as before.
 //   -DBOARD_LCD21       -> Waveshare ESP32-S3-Touch-LCD-2.1
 //   -DBOARD_AMOLED_143  -> Waveshare ESP32-S3-Touch-AMOLED-1.43
+//   -DBOARD_KNOB18      -> Waveshare ESP32-S3-Knob-Touch-LCD-1.8  (fork-only port)
 //   (none)              -> Waveshare ESP32-S3-Touch-AMOLED-1.75  (reference board)
 // Never guess pins for a new board: take them from the vendor demo or the Arduino
 // core board variant, then confirm them on hardware before committing.
@@ -182,6 +183,8 @@ static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f
 #  include "boards/board_lcd_21.h"
 #elif defined(BOARD_AMOLED_143)
 #  include "boards/board_amoled_143.h"
+#elif defined(BOARD_KNOB18)
+#  include "boards/board_knob_18.h"
 #else
 #  include "boards/board_amoled_175.h"
 #endif
