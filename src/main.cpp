@@ -1458,6 +1458,7 @@ void loop() {
         else
             snprintf(net, sizeof(net), "WiFi setup:\njoin CapsuleRadar-Setup");
         ui_set_netinfo(net);
+        ui_set_geo(g_settings.homeLat, g_settings.homeLon);   // the weather page shows where it is for
         ui_set_feed_source(g_adsb.lastHost());   // Stats "Feed" line: who served the last data
         const bool bpresent = battery_present();
         ui_set_battery(battery_percent(), battery_charging(), bpresent);
@@ -1528,11 +1529,30 @@ void loop() {
                 holdPending = false;         // landed on "none" or the plane left the feed: no card to wait for
             }
         }
+        // List wheel diagnostics: LVGL's memory-pool use when the list comes into view, and again once
+        // the ring has settled (the list's rows are what the pool is tight for).
+        static bool listWasActive = false, listLogPending = false;
+        static uint32_t lastListMs = 0;
+        const bool listNow = ui_list_active();
+        if (listNow && !listWasActive) display::logLvglMem("list shown");
+        listWasActive = listNow;
+        if (listLogPending && millis() - lastListMs > 2000) {
+            display::logLvglMem("2 s after the last knob scroll");
+            listLogPending = false;
+        }
         const int clicks = knob_take();
         if (clicks != 0) {
             const bool wasIdle = g_idle || radar::clockRequested();    // state BEFORE this click
             display::noteActivity();
-            if (!wasIdle && ui_sweep_visible() && radar::cycleSelection(clicks)) {
+            if (!wasIdle && ui_list_active()) {
+                if (ui_list_scroll(clicks)) {    // the list is a wheel: one row per click
+                    haptic_tick();
+                    listLogPending = true;
+                    lastListMs = millis();
+                }
+            } else if (!wasIdle && ui_weather_active()) {
+                if (ui_weather_cycle(clicks)) haptic_tick();     // weather page: the ring flips radar / clouds / forecast
+            } else if (!wasIdle && ui_sweep_visible() && radar::cycleSelection(clicks)) {
                 ui_knob_selection_changed();     // hides the card; it returns after the ring is still for KNOB_CARD_DELAY_MS
                 haptic_tick();
                 holdPending = true;              // the measurement above logs when the card comes back

@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 #include <vector>
 
 #define UI_GREEN lv_color_hex(0x1DFF86)
@@ -45,6 +46,10 @@ static lv_obj_t *s_weatherModeBtn = nullptr, *s_weatherModeLbl = nullptr;
 static lv_obj_t *s_weatherTitle = nullptr;
 enum WeatherViewMode { WEATHER_RADAR, WEATHER_CLOUDS, WEATHER_FORECAST };
 static WeatherViewMode s_weatherMode = WEATHER_RADAR;
+// The point the weather is for (the home position), set by main; shown on the weather page.
+static double s_geoLat = 0, s_geoLon = 0;
+static bool   s_geoValid = false;
+static lv_obj_t *s_wxLoc = nullptr;      // location line on the weather page (boards that define WEATHER_LOC_Y)
 static lv_obj_t *s_fcCurrent = nullptr, *s_fcCondition = nullptr, *s_fcUpdated = nullptr;
 static lv_obj_t *s_fcMetricName[3] = { nullptr, nullptr, nullptr };
 static lv_obj_t *s_fcMetricValue[3] = { nullptr, nullptr, nullptr };
@@ -155,8 +160,18 @@ static bool s_clockUp = false;
 #endif
 static bool        s_cardHold = false;
 static lv_timer_t *s_cardHoldTimer = nullptr;
+static bool        s_listHold = false;     // the hold was set by the aircraft list (released when the radar tile returns)
 static void card_hold_cancel(void) {
     s_cardHold = false;
+    s_listHold = false;
+    if (s_cardHoldTimer) lv_timer_pause(s_cardHoldTimer);
+}
+// The aircraft list changed the selection. The radar's card sits on a tile nobody can see, and every
+// poll refreshes it, so without this it would look up a route and photo for each aircraft the wheel
+// passes. Held until the radar tile is on screen again.
+static void card_hold_for_list(void) {
+    s_listHold = true;
+    s_cardHold = true;
     if (s_cardHoldTimer) lv_timer_pause(s_cardHoldTimer);
 }
 
@@ -458,6 +473,13 @@ void ui_set_netinfo(const char *line) {
     if (s_statsNet && line) lv_label_set_text(s_statsNet, line);
 }
 
+// The point the weather is for. Shown on the weather page on boards that define WEATHER_LOC_Y.
+void ui_set_geo(double lat, double lon) {
+    s_geoLat = lat;
+    s_geoLon = lon;
+    s_geoValid = true;
+}
+
 // Which provider served the last aircraft data. Shown on the Stats view so users can tell
 // whether they are on airplanes.live (feeder households) or a fallback — until now that
 // was only visible on the serial log, and it kept coming up in support threads.
@@ -552,6 +574,108 @@ static void list_tap_cb(lv_event_t *e) {
     lv_obj_set_tile_id(s_tv, 0, 0, LV_ANIM_ON);   // jump back to the radar
 }
 
+// ---- the aircraft list as a wheel (knob boards: LIST_WHEEL) ----
+// The ring scrolls the list one row per click. The row in the middle is the focus (it sits inside a
+// thin outline), rows fade with their distance from it, and a finger drag snaps to the nearest row.
+// Rows stay plain labels. The only per-row cost is one opacity style on the rows near the middle,
+// so the 64 KB LVGL pool is not pushed closer to the limit the build_list() comment warns about.
+// The list's vertical padding lets the first and last row reach the middle, so row k is centred at
+// scroll position k * pitch.
+#if defined(LIST_WHEEL)
+static std::vector<uint8_t> s_listRowOpa;                  // opacity last applied to each row (255 = none)
+
+// Row text helpers. "1670 m" -> "1670m" (tighter, as in the two-line layout).
+static void squeeze_spaces(char *s) {
+    char *o = s;
+    for (; *s; ++s) if (*s != ' ') *o++ = *s;
+    *o = '\0';
+}
+// Copy feed text into a row. '#' starts an LVGL colour command in a recoloured label, so it must never
+// come through from data.
+static void plain_text(char *dst, size_t n, const char *src) {
+    size_t i = 0;
+    for (; src && src[i] && i + 1 < n; ++i) dst[i] = (src[i] == '#') ? '.' : src[i];
+    dst[i] = '\0';
+}
+
+static float list_pitch(void) {                            // px from one row's top to the next
+    if (s_listRows.size() >= 2) {
+        const float p = (float)(lv_obj_get_y(s_listRows[1]) - lv_obj_get_y(s_listRows[0]));
+        if (p >= 1.0f) return p;                           // rows just created have no position until LVGL lays them out
+    }
+    return (float)(AC_ROW_H + 2);                          // row height + the list's 2 px row gap
+}
+
+static int list_centre_row(void) {                         // the row currently in the middle
+    const int n = (int)s_listRows.size();
+    if (n == 0) return 0;
+    const int i = (int)lroundf((float)lv_obj_get_scroll_y(s_list) / list_pitch());
+    return i < 0 ? 0 : (i >= n ? n - 1 : i);
+}
+
+// Fade rows with their distance from the middle. Only rows near it can be on screen, so only those
+// are touched, and a row is restyled only when its opacity moved enough to matter.
+static void list_wheel_apply(void) {
+    const int n = (int)s_listRows.size();
+    if (n == 0 || s_listRowOpa.size() != s_listRows.size()) return;
+    const float centre = (float)lv_obj_get_scroll_y(s_list) / list_pitch();   // fractional row index in the middle
+    int lo = (int)floorf(centre) - 5, hi = (int)ceilf(centre) + 5;
+    if (lo < 0) lo = 0;
+    if (hi > n - 1) hi = n - 1;
+    for (int i = lo; i <= hi; ++i) {
+        const float d = fabsf((float)i - centre);
+        int opa = 255 - (int)(62.0f * d);                  // 255 in the middle, ~193, ~131, ~69 further out
+        if (opa < 40) opa = 40;
+        const int cur = (int)s_listRowOpa[i];
+        if ((opa > cur ? opa - cur : cur - opa) < 4) continue;
+        lv_obj_set_style_opa(s_listRows[i], (lv_opa_t)opa, 0);
+        s_listRowOpa[i] = (uint8_t)opa;
+    }
+}
+
+static void list_scroll_cb(lv_event_t *e) {
+    (void)e;
+    list_wheel_apply();
+}
+
+// Sync, list to radar: when the list comes to rest (a finger drag settling on a row, or the knob's
+// scroll arriving) the aircraft in the middle becomes the selected one. The knob path has already
+// selected its target, so this is then a no-op.
+static void list_scroll_end_cb(lv_event_t *e) {
+    (void)e;
+    if (!s_tv || lv_tileview_get_tile_act(s_tv) != s_tileList || s_listRows.empty()) return;
+    const int c = list_centre_row();
+    AcInfo centre, cur;
+    radar::info(c, centre);
+    if (radar::selected(cur) && strcmp(cur.hex, centre.hex) == 0) return;   // already the selected one
+    radar::select(c);
+    card_hold_for_list();
+}
+
+// The knob acts on the list only while the list is the tile on screen and not mid-swipe.
+bool ui_list_active(void) {
+    return s_tv && s_list && lv_tileview_get_tile_act(s_tv) == s_tileList && !lv_obj_is_scrolling(s_tv);
+}
+
+// Move the focus by `steps` rows (+ = down, towards the farther aircraft). False when already at an end.
+bool ui_list_scroll(int steps) {
+    const int n = (int)s_listRows.size();
+    if (!s_list || n == 0 || steps == 0) return false;
+    const int from = list_centre_row();                    // start from where the list really is (a finger may have moved it)
+    int to = from + steps;
+    if (to < 0) to = 0;
+    if (to > n - 1) to = n - 1;
+    if (to == from) return false;
+    lv_obj_scroll_to_y(s_list, lv_obj_get_y(s_listRows[to]), LV_ANIM_ON);
+    radar::select(to);                                     // sync, list to radar: the focused row IS the selected aircraft
+    card_hold_for_list();                                  // selected NOW (not at scroll end) so a poll mid-scroll cannot pull the list back
+    return true;
+}
+#else
+bool ui_list_active(void) { return false; }
+bool ui_list_scroll(int) { return false; }
+#endif
+
 static void build_list(void) {
     if (!s_list) return;
     if (!s_rowStylesInit) {
@@ -559,6 +683,16 @@ static void build_list(void) {
         lv_style_set_width(&s_rowStyle, lv_pct(100));
         lv_style_set_pad_hor(&s_rowStyle, 13);
         lv_style_set_pad_ver(&s_rowStyle, 10);
+#if defined(LIST_WHEEL)
+        // A fixed row height (two lines). LV_LABEL_LONG_DOT only truncates a label with a FIXED height;
+        // a content-sized one grows instead, which spilled out of the focus box.
+        lv_style_set_height(&s_rowStyle, AC_ROW_H);
+        lv_style_set_pad_hor(&s_rowStyle, 10);                        // more room for the long second line
+        lv_style_set_pad_ver(&s_rowStyle, 6);                         // two lines (2 x 16 px + 2 px gap) fit the 48 px row
+        lv_style_set_text_font(&s_rowStyle, F14());                   // the worst second line is ~290 px at size 14
+        lv_style_set_text_line_space(&s_rowStyle, 2);
+        lv_style_set_text_align(&s_rowStyle, LV_TEXT_ALIGN_CENTER);   // symmetric inside the round glass
+#endif
         lv_style_set_border_side(&s_rowStyle, LV_BORDER_SIDE_BOTTOM);
         lv_style_set_border_width(&s_rowStyle, 1);
         lv_style_set_border_color(&s_rowStyle, lv_color_hex(0xE0E0E0));
@@ -567,13 +701,40 @@ static void build_list(void) {
         s_rowStylesInit = true;
     }
     const int n = radar::count();
+#if defined(LIST_WHEEL)
+    AcInfo selInfo;
+    const bool haveSel = radar::selected(selInfo);                // the aircraft selected on the radar (or by this list)
+    int selIdx = -1;                                              // ...and where the sort put it this time
+#endif
     for (int i = 0; i < n; ++i) {
         AcInfo in;
         radar::info(i, in);
-        char altS[16], txt[64];
+#if defined(LIST_WHEEL)
+        if (haveSel && strcmp(in.hex, selInfo.hex) == 0) selIdx = i;
+#endif
+        char altS[16], txt[112];
         fmt_alt(altS, sizeof(altS), in.altFt, in.onGround);
+#if defined(LIST_WHEEL)
+        // Two lines per aircraft, in ONE label (the 64 KB LVGL pool is tight):
+        //   QFA537    B738
+        //   ALT 1670m  DIST 2.4km  SPD 156km/h
+        // Units follow the user's unit setting through the same helpers as the detail card. Line 1 is
+        // brighter through LVGL's inline recolour; an emergency row skips it and stays all red.
+        char spdS[16], c1[16], ty[12], head[40];
+        squeeze_spaces(altS);                                     // "1670 m" -> "1670m"
+        fmt_spd(spdS, sizeof(spdS), in.gsKt);
+        squeeze_spaces(spdS);                                     // "156 km/h" -> "156km/h"
+        plain_text(c1, sizeof(c1), in.call[0] ? in.call : in.hex);
+        plain_text(ty, sizeof(ty), in.type);
+        if (ty[0]) snprintf(head, sizeof(head), "%s    %s", c1, ty);
+        else       snprintf(head, sizeof(head), "%s", c1);
+        snprintf(txt, sizeof(txt), "%s%s%s\nALT %s  DIST %.1f%s  SPD %s",
+                 in.emergency ? "" : "#EAFFF3 ", head, in.emergency ? "" : "#",
+                 altS, dist_val(in.distKm), dist_unit(), spdS);
+#else
         snprintf(txt, sizeof(txt), "%-8.8s  %-8s %4.1f %s",
                  in.call[0] ? in.call : in.hex, altS, dist_val(in.distKm), dist_unit());
+#endif
         if (i < (int)s_listRows.size()) {          // existing row: just refresh its content
             lv_obj_t *l = s_listRows[i];
             lv_label_set_text(l, txt);
@@ -590,6 +751,11 @@ static void build_list(void) {
             if (in.emergency) lv_obj_add_style(l, &s_rowEmgStyle, 0);
             s_listRows.push_back(l);
             s_listRowEmg.push_back(in.emergency);
+#if defined(LIST_WHEEL)
+            lv_obj_add_flag(l, LV_OBJ_FLAG_SNAPPABLE);     // a finger drag settles on a row
+            lv_label_set_recolor(l, true);                 // line 1 is brighter (inline colour markup)
+            s_listRowOpa.push_back(255);
+#endif
         }
     }
     // Surplus rows go from the end — safe mid-press: the press lives on the list container,
@@ -598,7 +764,21 @@ static void build_list(void) {
         lv_obj_del(s_listRows[i]);
         s_listRows.erase(s_listRows.begin() + i);
         s_listRowEmg.erase(s_listRowEmg.begin() + i);
+#if defined(LIST_WHEEL)
+        s_listRowOpa.erase(s_listRowOpa.begin() + i);
+#endif
     }
+#if defined(LIST_WHEEL)
+    // Sync, radar to list: the selected aircraft sits in the middle of the wheel and STAYS there. The
+    // list is sorted nearest-first, so a poll can move the aircraft to another row; follow it instead of
+    // leaving whoever now occupies the old row under the outline. Not while a finger is moving the list.
+    if (selIdx >= 0 && selIdx < (int)s_listRows.size() && !lv_obj_is_scrolling(s_list)) {
+        lv_obj_update_layout(s_list);              // rows created in this pass need a position first
+        if (list_centre_row() != selIdx)
+            lv_obj_scroll_to_y(s_list, lv_obj_get_y(s_listRows[selIdx]), LV_ANIM_OFF);
+    }
+    list_wheel_apply();                            // new rows start opaque: fade them by their distance from the middle
+#endif
 }
 
 static void build_stats(void) {
@@ -755,6 +935,12 @@ static void build_weather(void) {
     for (lv_obj_t *o : radarObjs) if (o) {
         if (forecastMode) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN); else lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
     }
+#if defined(WEATHER_NO_AIRPORT)
+    // The "nearest airport to the radar centre" label sits above the picture, which on a short round glass
+    // is partly above the screen (it showed as clipped text at the top). It is re-shown by the loop above
+    // on every rebuild, so it is hidden again here.
+    if (s_wxAirport) lv_obj_add_flag(s_wxAirport, LV_OBJ_FLAG_HIDDEN);
+#endif
     if (!forecastMode && haveImage) lv_obj_add_flag(s_wxStatus, LV_OBJ_FLAG_HIDDEN);
     if (!forecastMode && !haveImage) lv_obj_add_flag(s_wxCanvas, LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text(s_wxRange, cloudMode ? "200 KM" : "75 KM");
@@ -764,6 +950,28 @@ static void build_weather(void) {
     if (s_weatherTitle) lv_label_set_text(s_weatherTitle,
         s_weatherMode == WEATHER_RADAR ? "WX RADAR" :
         s_weatherMode == WEATHER_CLOUDS ? "SAT CLOUDS" : "WEATHER");
+#if defined(WEATHER_LOC_Y)
+    if (s_wxLoc) {
+        // Where this page is about: the radar/cloud picture's own centre when one is showing, otherwise the
+        // home position main gave us (the forecast is for the home position).
+        double lat = s_geoLat, lon = s_geoLon;
+        bool have = s_geoValid;
+        if (haveImage && !forecastMode) { lat = rlat; lon = rlon; have = true; }
+        if (!have) {
+            lv_label_set_text(s_wxLoc, "LOCATION UNKNOWN");
+        } else {
+            char ap[48] = "";
+            char iata[4]; float d = 0, b = 0;
+            if (airports_nearest_iata(lat, lon, 200.0f, iata, &d, &b))
+                snprintf(ap, sizeof(ap), "  |  %s %.0f %s %s", iata, dist_val(d), dist_unit(), cardinal(b));
+            char loc[96];
+            // "\xC2\xB0" is the UTF-8 degree sign (see weather_temp_unit)
+            snprintf(loc, sizeof(loc), "%.2f\xC2\xB0%c  %.2f\xC2\xB0%c%s",
+                     fabs(lat), lat < 0 ? 'S' : 'N', fabs(lon), lon < 0 ? 'W' : 'E', ap);
+            lv_label_set_text(s_wxLoc, loc);
+        }
+    }
+#endif
 }
 
 // Registered once, on the whole weather panel (see ui_create) -- the mode pill and the
@@ -776,6 +984,23 @@ static void weather_mode_cb(lv_event_t *) {
     last = now;
     s_weatherMode = (WeatherViewMode)(((int)s_weatherMode + 1) % 3);
     build_weather();
+}
+
+// The knob changes the weather mode while the weather page is the tile on screen and not mid-swipe.
+bool ui_weather_active(void) {
+    return s_tv && s_tileWeather && lv_tileview_get_tile_act(s_tv) == s_tileWeather && !lv_obj_is_scrolling(s_tv);
+}
+
+// Step the mode by `steps` (+ = forward: radar, clouds, forecast, then round again; - = back). The caller
+// passes the net clicks of one loop pass, so a fast spin rebuilds the page once, not once per click.
+bool ui_weather_cycle(int steps) {
+    const int count = 3;
+    int m = ((int)s_weatherMode + steps) % count;
+    if (m < 0) m += count;
+    if (m == (int)s_weatherMode) return false;             // a full lap (or no net movement): nothing changed
+    s_weatherMode = (WeatherViewMode)m;
+    build_weather();
+    return true;
 }
 
 void ui_set_weather_forecast(bool forecast) {
@@ -892,11 +1117,70 @@ static lv_obj_t *make_tile_title(lv_obj_t *tile, const char *txt) {
     return l;
 }
 
+// Diameter of the round panel behind the list/stats tiles (px). 462 suits the 466 px boards; a board
+// header can override it. On a 360 px screen a 462 px panel would stand 51 px above the glass and
+// put the tile titles off-screen.
+#ifndef ROUND_PANEL_D
+#define ROUND_PANEL_D 462
+#endif
+
+// The weather tile is positioned from its panel's TOP edge, for a 462 px panel (the 466 px boards).
+// A 462 px panel centred on a 360 px screen puts the 360 px radar circle in the middle (1 px off), so
+// the weather panel keeps this size on every board, whatever ROUND_PANEL_D is. (Shrinking it to
+// ROUND_PANEL_D moved the whole weather page about 51 px down.)
+#ifndef WEATHER_PANEL_D
+#define WEATHER_PANEL_D 462
+#endif
+
+// The weather radar / cloud picture is WX_RADAR_SIZE px across, shown 1:1 (it is a crop of a larger
+// source image, so a smaller canvas would show LESS area, not the same area smaller). On a round glass of
+// about that size it fills the whole screen edge to edge and looks zoomed in, where the 466 px boards
+// leave ~53 px of margin around it. WX_VIEW_D is the diameter it is DRAWN at: the picture is scaled
+// about its centre, and its rings and labels with it, so it shows the same area, just smaller.
+// Default: unscaled.
+#ifndef WX_VIEW_D
+#define WX_VIEW_D WX_RADAR_SIZE
+#endif
+
+// Where the "N" marker sits (panel-relative y). Default: just inside the top of the drawn circle. A board
+// that puts a location line there (WEATHER_LOC_Y) moves it down clear of that line.
+#ifndef WX_NORTH_Y
+#define WX_NORTH_Y (58 + (WX_RADAR_SIZE - WX_VIEW_D) / 2)
+#endif
+
+// Forecast page vertical nudges (px), added to the bigger boards' positions. FC_HEAD_DY moves the big
+// temperature and the condition under the title; FC_METRIC_DY moves the FEELS / HUMIDITY / WIND row so
+// it keeps its gap from the condition. Defaults: no change.
+#ifndef FC_HEAD_DY
+#define FC_HEAD_DY 0
+#endif
+#ifndef FC_METRIC_DY
+#define FC_METRIC_DY 0
+#endif
+
+// Stats tile layout: offsets from the panel centre (px). The defaults suit the 466 px boards; a board
+// header can pull them in for a smaller round glass.
+#ifndef STATS_LBL_Y
+#define STATS_LBL_Y -16
+#endif
+#ifndef STATS_GPS_Y
+#define STATS_GPS_Y 90
+#endif
+#ifndef STATS_NET_Y
+#define STATS_NET_Y 132
+#endif
+#ifndef STATS_NET_W
+#define STATS_NET_W 320
+#endif
+#ifndef STATS_VER_Y
+#define STATS_VER_Y 170
+#endif
+
 // A full-screen round panel that clips its content to the circle (for list/stats views).
-static lv_obj_t *make_round_panel(lv_obj_t *parent) {
+static lv_obj_t *make_round_panel(lv_obj_t *parent, int d = ROUND_PANEL_D) {
     lv_obj_t *p = lv_obj_create(parent);
     lv_obj_remove_style_all(p);
-    lv_obj_set_size(p, 462, 462);
+    lv_obj_set_size(p, d, d);
     lv_obj_center(p);
     lv_obj_set_style_radius(p, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(p, lv_color_hex(0x05100A), 0);
@@ -1048,10 +1332,22 @@ void ui_create(void) {
     s_tileList  = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_HOR);
     s_tileStats = lv_tileview_add_tile(s_tv, 2, 0, LV_DIR_HOR);
     s_tileWeather = lv_tileview_add_tile(s_tv, 3, 0, LV_DIR_LEFT);
+    // The weather panel is larger than a short round screen (see WEATHER_PANEL_D), and an oversized child
+    // makes its tile scrollable: the whole page could be dragged about around. The tile must not scroll
+    // itself, only chain swipes to the tileview, exactly as the radar tile does.
+    lv_obj_clear_flag(s_tileWeather, LV_OBJ_FLAG_SCROLLABLE);
     // Rebuild the list/stats with the latest data the moment they slide into view
     // (between polls they'd otherwise show whatever was there when last visible).
     lv_obj_add_event_cb(s_tv, [](lv_event_t *) {
         refresh_active_tile();
+#if defined(LIST_WHEEL)
+        // Back on the radar after choosing an aircraft in the list: release the hold the list set, so the
+        // card (with its route and photo lookups) appears now, for the aircraft that was selected there.
+        if (s_listHold && lv_tileview_get_tile_act(s_tv) == s_tileRadar) {
+            card_hold_cancel();
+            refresh_card();
+        }
+#endif
         if (s_viewChangedCb) s_viewChangedCb(active_view_index());   // let main remember the last view
     }, LV_EVENT_VALUE_CHANGED, nullptr);
 
@@ -1150,8 +1446,13 @@ void ui_create(void) {
     lv_obj_t *lp = make_round_panel(s_tileList);
     make_tile_title(lp, "AIRCRAFT");
     s_list = lv_list_create(lp);
+#if defined(LIST_WHEEL)
+    lv_obj_set_size(s_list, AC_LIST_W, AC_LIST_H);           // sized to the round glass (board header)
+    lv_obj_align(s_list, LV_ALIGN_CENTER, 0, AC_LIST_Y_OFFSET);
+#else
     lv_obj_set_size(s_list, s_bigText ? 340 : 300, 372);   // wider rows so big-font distances don't clip
     lv_obj_align(s_list, LV_ALIGN_CENTER, 0, 22);
+#endif
     lv_obj_set_style_bg_opa(s_list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_list, 0, 0);
     lv_obj_set_style_pad_row(s_list, 2, 0);
@@ -1160,6 +1461,24 @@ void ui_create(void) {
     lv_obj_set_style_text_color(s_list, UI_SOFT, 0);
     lv_obj_add_event_cb(s_list, list_press_cb, LV_EVENT_PRESSED, NULL);  // pick the plane at touch-down
     lv_obj_add_event_cb(s_list, list_tap_cb, LV_EVENT_CLICKED, NULL);   // rows aren't clickable
+#if defined(LIST_WHEEL)
+    {   // the wheel: padding lets the first/last row reach the middle, rows snap there, and one thin
+        // outline (not per row) marks the focus row
+        lv_obj_set_style_pad_ver(s_list, (AC_LIST_H - AC_ROW_H) / 2, 0);   // (view height - row height) / 2
+        lv_obj_set_scroll_snap_y(s_list, LV_SCROLL_SNAP_CENTER);
+        lv_obj_add_event_cb(s_list, list_scroll_cb, LV_EVENT_SCROLL, NULL);
+        lv_obj_add_event_cb(s_list, list_scroll_end_cb, LV_EVENT_SCROLL_END, NULL);   // list -> radar selection sync
+        lv_obj_t *band = lv_obj_create(lp);                            // created after the list: drawn over it
+        lv_obj_remove_style_all(band);
+        lv_obj_set_size(band, AC_LIST_W - 4, AC_ROW_H + 4);            // the row, with a little air around it
+        lv_obj_align(band, LV_ALIGN_CENTER, 0, AC_LIST_Y_OFFSET);
+        lv_obj_set_style_radius(band, 10, 0);
+        lv_obj_set_style_border_color(band, UI_GREEN, 0);
+        lv_obj_set_style_border_width(band, 1, 0);
+        lv_obj_set_style_border_opa(band, 150, 0);
+        lv_obj_clear_flag(band, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);   // taps pass through to the list
+    }
+#endif
 
     // --- stats tile (circular panel) ---
     lv_obj_t *sp = make_round_panel(s_tileStats);
@@ -1168,23 +1487,23 @@ void ui_create(void) {
     lv_obj_set_style_text_font(s_statsLbl, F16(), 0);
     lv_obj_set_style_text_color(s_statsLbl, UI_SOFT, 0);
     lv_label_set_text(s_statsLbl, "Aircraft   0");
-    lv_obj_align(s_statsLbl, LV_ALIGN_CENTER, 0, -16);
+    lv_obj_align(s_statsLbl, LV_ALIGN_CENTER, 0, STATS_LBL_Y);
 
     s_statsGps = lv_label_create(sp);               // GPS status line (hidden unless GPS is on)
     lv_obj_set_style_text_font(s_statsGps, F14(), 0);
     lv_obj_set_style_text_color(s_statsGps, UI_SOFT, 0);
     lv_obj_set_style_text_align(s_statsGps, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_statsGps, "");
-    lv_obj_align(s_statsGps, LV_ALIGN_CENTER, 0, 90);
+    lv_obj_align(s_statsGps, LV_ALIGN_CENTER, 0, STATS_GPS_Y);
 
     // footer: where to reach the configuration page (IP / hostname / setup AP)
     s_statsNet = lv_label_create(sp);
-    lv_obj_set_width(s_statsNet, 320);
+    lv_obj_set_width(s_statsNet, STATS_NET_W);
     lv_obj_set_style_text_font(s_statsNet, F14(), 0);
     lv_obj_set_style_text_color(s_statsNet, UI_GREEN, 0);
     lv_obj_set_style_text_align(s_statsNet, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_statsNet, "");
-    lv_obj_align(s_statsNet, LV_ALIGN_CENTER, 0, 132);
+    lv_obj_align(s_statsNet, LV_ALIGN_CENTER, 0, STATS_NET_Y);
 
     // power off (hold) -- top of the Stats view, under the title
     s_offBtn = lv_btn_create(sp);
@@ -1226,10 +1545,10 @@ void ui_create(void) {
     lv_obj_set_style_text_font(ver, F12(), 0);
     lv_obj_set_style_text_color(ver, UI_DIM, 0);
     lv_label_set_text(ver, "Capsule Radar v" FW_VERSION);
-    lv_obj_align(ver, LV_ALIGN_CENTER, 0, 170);
+    lv_obj_align(ver, LV_ALIGN_CENTER, 0, STATS_VER_Y);
 
     // --- weather tile (current conditions + next three days) ---
-    lv_obj_t *wp = make_round_panel(s_tileWeather);
+    lv_obj_t *wp = make_round_panel(s_tileWeather, WEATHER_PANEL_D);   // its layout is positioned from this panel's top edge
     // The entire view cycles the weather mode: there is nothing else to touch here, and a
     // 34px pill 18px from the bottom of a ROUND panel is a genuinely hard target -- measured
     // presses aimed at it landed a few px low, outside it, and read as the button ignoring
@@ -1243,6 +1562,11 @@ void ui_create(void) {
     lv_obj_add_event_cb(wp, weather_mode_cb, LV_EVENT_CLICKED, nullptr);
     lv_obj_set_style_bg_color(wp, lv_color_black(), 0); // hide square radar-tile bounds on AMOLED
     s_weatherTitle = make_tile_title(wp, "WX RADAR");
+#if defined(WEATHER_TITLE_Y)
+    // The title names the mode. The weather panel stands above the glass on a short round screen, so its
+    // default position is off the top; a board header puts it back on the glass.
+    lv_obj_align(s_weatherTitle, LV_ALIGN_TOP_MID, 0, WEATHER_TITLE_Y);
+#endif
     lv_obj_set_style_bg_color(s_weatherTitle, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(s_weatherTitle, 170, 0);
     lv_obj_set_style_pad_left(s_weatherTitle, 8, 0);
@@ -1250,6 +1574,20 @@ void ui_create(void) {
     lv_obj_set_style_pad_top(s_weatherTitle, 2, 0);
     lv_obj_set_style_pad_bottom(s_weatherTitle, 2, 0);
     lv_obj_set_style_radius(s_weatherTitle, 8, 0);
+#if defined(WEATHER_LOC_Y)
+    // Where the weather is for: the home coordinates and the nearest airport, on a line under the title
+    // (the bigger boards only show a nearest-airport label above the picture). It is in neither the radar
+    // nor the forecast object list in build_weather(), so it stays visible in all three modes.
+    s_wxLoc = lv_label_create(wp);
+    lv_obj_set_style_text_font(s_wxLoc, F12(), 0);
+    lv_obj_set_style_text_color(s_wxLoc, UI_SOFT, 0);
+    lv_obj_set_style_bg_color(s_wxLoc, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_wxLoc, 160, 0);
+    lv_obj_set_style_pad_hor(s_wxLoc, 6, 0);
+    lv_obj_set_style_radius(s_wxLoc, 6, 0);
+    lv_label_set_text(s_wxLoc, "");
+    lv_obj_align(s_wxLoc, LV_ALIGN_TOP_MID, 0, WEATHER_LOC_Y);
+#endif
     s_weatherNow = lv_label_create(wp);
     lv_obj_set_width(s_weatherNow, 330);
     lv_obj_set_style_text_font(s_weatherNow, &lv_font_montserrat_28, 0);
@@ -1292,8 +1630,24 @@ void ui_create(void) {
     lv_obj_align(s_wxAirport, LV_ALIGN_TOP_MID, 0, 46);
 
     s_wxCanvas = lv_canvas_create(wp);
+#if WX_VIEW_D != WX_RADAR_SIZE
+    // Draw the picture smaller, about its centre, so it has a margin on a round glass (see WX_VIEW_D).
+    // 256 = 100%. The decoded picture and its buffer are untouched; only how it is drawn changes.
+    //
+    // The widget must be exactly the size the picture is DRAWN at, in "real size" mode. LVGL's image
+    // widget TILES its picture across the whole widget: with the widget left at WX_RADAR_SIZE and the
+    // picture drawn smaller, a second copy started at WX_VIEW_D px and its edges showed as bright
+    // strips down the right and across the bottom. In real-size mode the scaled picture sits at the
+    // widget's top-left and the widget is the same size, so there is a single copy.
+    lv_img_set_size_mode(s_wxCanvas, LV_IMG_SIZE_MODE_REAL);
+    lv_obj_set_size(s_wxCanvas, WX_VIEW_D, WX_VIEW_D);
+    lv_obj_align(s_wxCanvas, LV_ALIGN_TOP_MID, 0, 52 + (WX_RADAR_SIZE - WX_VIEW_D) / 2);   // centred where the 360 px one was
+    lv_img_set_pivot(s_wxCanvas, WX_RADAR_SIZE / 2, WX_RADAR_SIZE / 2);
+    lv_img_set_zoom(s_wxCanvas, (256 * WX_VIEW_D) / WX_RADAR_SIZE);
+#else
     lv_obj_set_size(s_wxCanvas, WX_RADAR_SIZE, WX_RADAR_SIZE);
     lv_obj_align(s_wxCanvas, LV_ALIGN_TOP_MID, 0, 52);
+#endif
     // Not clickable: taps pass through to the panel, which owns the whole view.
     lv_obj_clear_flag(s_wxCanvas, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(s_wxCanvas, LV_OBJ_FLAG_HIDDEN);
@@ -1305,12 +1659,12 @@ void ui_create(void) {
     lv_label_set_text(s_wxStatus, "ACQUIRING WX RADAR...");
     lv_obj_align(s_wxStatus, LV_ALIGN_TOP_MID, 0, 222);
 
-    const int ringSize[3] = { 360, 240, 120 };
+    const int ringSize[3] = { WX_VIEW_D, WX_VIEW_D * 2 / 3, WX_VIEW_D / 3 };   // 100% / 66% / 33% of the drawn circle
     for (int i = 0; i < 3; ++i) {
         s_wxRings[i] = lv_obj_create(wp);
         lv_obj_remove_style_all(s_wxRings[i]);
         lv_obj_set_size(s_wxRings[i], ringSize[i], ringSize[i]);
-        lv_obj_align(s_wxRings[i], LV_ALIGN_TOP_MID, 0, 52 + (360 - ringSize[i]) / 2);
+        lv_obj_align(s_wxRings[i], LV_ALIGN_TOP_MID, 0, 52 + (WX_RADAR_SIZE - ringSize[i]) / 2);   // concentric with the canvas
         lv_obj_set_style_radius(s_wxRings[i], LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_border_color(s_wxRings[i], UI_GREEN, 0);
         lv_obj_set_style_border_opa(s_wxRings[i], i == 0 ? 180 : 90, 0);
@@ -1321,7 +1675,7 @@ void ui_create(void) {
     lv_obj_set_style_text_font(s_wxNorth, F12(), 0);
     lv_obj_set_style_text_color(s_wxNorth, UI_GREEN, 0);
     lv_label_set_text(s_wxNorth, "N");
-    lv_obj_align(s_wxNorth, LV_ALIGN_TOP_MID, 0, 58);
+    lv_obj_align(s_wxNorth, LV_ALIGN_TOP_MID, 0, WX_NORTH_Y);
     s_wxCenter = lv_label_create(wp);
     lv_obj_set_style_text_font(s_wxCenter, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(s_wxCenter, UI_INK, 0);
@@ -1331,7 +1685,17 @@ void ui_create(void) {
     lv_obj_set_style_text_font(s_wxRange, F12(), 0);
     lv_obj_set_style_text_color(s_wxRange, UI_GREEN, 0);
     lv_label_set_text(s_wxRange, "75 KM");
-    lv_obj_align(s_wxRange, LV_ALIGN_TOP_MID, 128, 225);
+#if defined(WX_RANGE_ON_OUTER_RING)
+    // The label is the range of the OUTER ring (the radius of the picture), so it sits on the outer ring, on
+    // the right where the glass is widest, with a background so the ring line does not strike through it.
+    lv_obj_set_style_bg_color(s_wxRange, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_wxRange, 200, 0);
+    lv_obj_set_style_pad_hor(s_wxRange, 3, 0);
+    lv_obj_set_style_radius(s_wxRange, 4, 0);
+    lv_obj_align(s_wxRange, LV_ALIGN_TOP_MID, WX_VIEW_D / 2, 225);
+#else
+    lv_obj_align(s_wxRange, LV_ALIGN_TOP_MID, 128 * WX_VIEW_D / WX_RADAR_SIZE, 225);   // the bigger boards: near the middle ring
+#endif
 
     s_wxFooter = lv_label_create(wp);
     lv_obj_set_width(s_wxFooter, 360);
@@ -1370,12 +1734,12 @@ void ui_create(void) {
     lv_obj_set_style_text_font(s_fcCurrent, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(s_fcCurrent, UI_INK, 0);
     lv_label_set_text(s_fcCurrent, "-- C");
-    lv_obj_align(s_fcCurrent, LV_ALIGN_TOP_MID, 0, 68);
+    lv_obj_align(s_fcCurrent, LV_ALIGN_TOP_MID, 0, 68 + FC_HEAD_DY);
     s_fcCondition = lv_label_create(wp);
     lv_obj_set_style_text_font(s_fcCondition, F16(), 0);
     lv_obj_set_style_text_color(s_fcCondition, UI_SOFT, 0);
     lv_label_set_text(s_fcCondition, "Waiting for data");
-    lv_obj_align(s_fcCondition, LV_ALIGN_TOP_MID, 0, 105);
+    lv_obj_align(s_fcCondition, LV_ALIGN_TOP_MID, 0, 105 + FC_HEAD_DY);
 
     const char *metricNames[3] = { "FEELS", "HUMIDITY", "WIND" };
     const int colX[3] = { -122, 0, 122 };
@@ -1384,12 +1748,12 @@ void ui_create(void) {
         lv_obj_set_style_text_font(s_fcMetricName[i], F12(), 0);
         lv_obj_set_style_text_color(s_fcMetricName[i], UI_DIM, 0);
         lv_label_set_text(s_fcMetricName[i], metricNames[i]);
-        lv_obj_align(s_fcMetricName[i], LV_ALIGN_TOP_MID, colX[i], 150);
+        lv_obj_align(s_fcMetricName[i], LV_ALIGN_TOP_MID, colX[i], 150 + FC_METRIC_DY);
         s_fcMetricValue[i] = lv_label_create(wp);
         lv_obj_set_style_text_font(s_fcMetricValue[i], F16(), 0);
         lv_obj_set_style_text_color(s_fcMetricValue[i], UI_INK, 0);
         lv_label_set_text(s_fcMetricValue[i], "-");
-        lv_obj_align(s_fcMetricValue[i], LV_ALIGN_TOP_MID, colX[i], 170);
+        lv_obj_align(s_fcMetricValue[i], LV_ALIGN_TOP_MID, colX[i], 170 + FC_METRIC_DY);
 
         s_fcDay[i] = lv_label_create(wp);
         lv_obj_set_style_text_font(s_fcDay[i], F16(), 0);
@@ -1437,6 +1801,11 @@ void ui_create(void) {
     lv_obj_set_style_text_color(s_weatherModeLbl, UI_GREEN, 0);
     lv_label_set_text(s_weatherModeLbl, "3-DAY FORECAST");
     lv_obj_center(s_weatherModeLbl);
+#if defined(WEATHER_NO_MODE_BTN)
+    // The title at the top already names the mode, and the ring (or a tap anywhere) changes it, so the
+    // button at the bottom -- which only shows the NEXT mode's name -- is redundant on this board.
+    lv_obj_add_flag(s_weatherModeBtn, LV_OBJ_FLAG_HIDDEN);
+#endif
 
     lv_obj_set_tile_id(s_tv, 0, 0, LV_ANIM_OFF);
 

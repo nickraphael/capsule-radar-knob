@@ -16,6 +16,10 @@ shift
 goto :parse_args
 :args_done
 
+rem Remove the previous firmware.bin FIRST, before anything that can fail (Docker not running, the image
+rem build, the compile). A failed build must leave nothing for "deploy.cmd --keep-wifi" to flash by mistake.
+if exist ".pio\build\%ENV_NAME%\firmware.bin" del ".pio\build\%ENV_NAME%\firmware.bin"
+
 echo === BUILD: %ENV_NAME% ===
 docker info >nul 2>&1
 if errorlevel 1 (
@@ -32,8 +36,8 @@ if errorlevel 1 (
     exit /b 1
   )
 )
-rem Remove the previous copy first: if this build fails there is then NO firmware.bin to flash by mistake.
-if exist ".pio\build\%ENV_NAME%\firmware.bin" del ".pio\build\%ENV_NAME%\firmware.bin"
+rem The stale firmware.bin was already removed at the top of this script.
+rem (nothing to delete here any more)
 docker run --rm -v "%cd%:/project" -v %VOL_CACHE%:/root/.platformio -v %VOL_WORK%:/pio_work -e PLATFORMIO_WORKSPACE_DIR=/pio_work -w /project %IMAGE% bash scripts/docker_build.sh %ENV_NAME%
 if errorlevel 1 (
   echo.

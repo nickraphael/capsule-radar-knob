@@ -26,6 +26,11 @@ uint32_t inactiveMs();
 // Not available on the LCD 2.1 backend; only the knob build calls it.
 void noteActivity();
 
+// One serial line with LVGL's own memory pool: bytes used now, the peak, and the biggest free block.
+// A diagnostic for the list wheel (the 64 KB pool is what the list's row code is careful about).
+// Not available on the LCD 2.1 backend; only the knob build calls it.
+void logLvglMem(const char *tag);
+
 // Rotate the whole UI clockwise by an arbitrary number of degrees (normalized to
 // 0..359), e.g. to compensate for any enclosure/mounting angle. Cardinal rotations
 // keep their optimized flush paths; other angles use a PSRAM framebuffer. Touch input

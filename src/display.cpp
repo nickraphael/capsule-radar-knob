@@ -945,6 +945,14 @@ uint32_t inactiveMs() { return lv_disp_get_inactive_time(NULL); }
 
 void noteActivity() { lv_disp_trig_activity(NULL); }
 
+void logLvglMem(const char *tag) {
+    lv_mem_monitor_t m;
+    lv_mem_monitor(&m);
+    Serial.printf("[lvgl] %s: pool %u of %u bytes in use (%u%%), peak %u, biggest free block %u\n", tag,
+                  (unsigned)(m.total_size - m.free_size), (unsigned)m.total_size, (unsigned)m.used_pct,
+                  (unsigned)m.max_used, (unsigned)m.free_biggest_size);
+}
+
 } // namespace display
 
 #endif  // !BOARD_LCD21

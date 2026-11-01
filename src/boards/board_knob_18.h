@@ -96,6 +96,66 @@
 #define PH_MAXW             176
 #define PH_MAXH             117
 
+// ---------- Aircraft list: a wheel for the knob ----------
+// The ring scrolls the list one row per click; the row in the middle is the focus (inside a thin
+// outline), rows fade with distance from it, and a finger drag snaps to the nearest row.
+// LIST_WHEEL switches this on (the other boards keep the plain list). The list box is sized for the
+// round 360 glass: a row of about 210 px of text fits the glass for the rows near the middle, and the
+// outer rows are faded. ROUND_PANEL_D is the round panel behind the list/stats tiles: the 466 px
+// boards use 462, which on this screen would stand 51 px above the glass and put the tile titles
+// ("AIRCRAFT", "STATS") off-screen.
+// The AC_ prefix is deliberate: a bare LIST_H is FreeRTOS's list.h include guard, and defining it
+// here silently skips that header and breaks the build.
+#define LIST_WHEEL          1
+#define ROUND_PANEL_D       360
+#define AC_LIST_W           318     // the glass is ~340 px wide at the middle rows; the worst second line needs ~290 px of text
+#define AC_LIST_H           252
+#define AC_ROW_H            48      // every row is exactly TWO lines of size-14 text; a fixed height is what makes overlong text end in "..." instead of growing
+#define AC_LIST_Y_OFFSET    14      // below the centre, clear of the title
+
+// ---------- Stats and weather tiles on the round 360 glass ----------
+// Stats: offsets from the panel centre (px). The stats block is 7 lines of size-16 text (~126 px tall),
+// the footer is 3 lines of size 14 (~48 px; widest line ~255 px: IP and coordinates) and the version
+// line is size 12. The 466 px layout put the footer 77 px below the stats and the version line at +170,
+// where a 360 glass is only ~75 px wide, so both ran off the bottom. These group them (14 px between
+// stats and footer) and centre the group vertically under the title.
+#define STATS_LBL_Y         -43
+#define STATS_NET_Y         58
+#define STATS_VER_Y         98
+// Weather: its layout is positioned from the panel's TOP edge, for a 462 px panel. Centred on this
+// glass, a 462 px panel puts the 360 px radar circle in the middle (1 px off). Do not shrink it to
+// ROUND_PANEL_D: that moved the whole weather page about 51 px down.
+#define WEATHER_PANEL_D     462
+// The title names the weather mode (WX RADAR / SAT CLOUDS / WEATHER). Panel-relative y: the 462 px panel
+// stands 51 px above the glass, so 71 puts the title 20 px from the top of the glass.
+#define WEATHER_TITLE_Y     71
+// The title names the mode and the ring (or a tap anywhere) changes it, so the button at the bottom,
+// which only shows the NEXT mode's name, is dropped on this board.
+#define WEATHER_NO_MODE_BTN 1
+// The "nearest airport to the radar centre" label is positioned above the picture for the bigger
+// boards; on this glass it is half above the screen and shows as clipped text at the top.
+#define WEATHER_NO_AIRPORT  1
+// The radar / cloud picture is a 360 px crop shown 1:1, which fills this 360 px glass edge to edge and
+// looks zoomed in. The 466 px boards draw it at 77% of the screen. 280 px is 78% of this glass; the
+// picture is scaled about its centre (with its rings and labels), so it shows the same area, smaller.
+#define WX_VIEW_D           280
+// Forecast page: the bigger boards' layout starts the big temperature 17 px from the top of this glass,
+// right where the title now sits, so the two overprinted. FC_HEAD_DY moves the temperature and the
+// condition line down clear of the title; FC_METRIC_DY moves the FEELS / HUMIDITY / WIND row down to
+// keep its gap from the condition. The day columns and "UPDATED" already fit and stay put.
+// 47 / 25 leave room for the location line (WEATHER_LOC_Y) between the title and the temperature:
+// title 20-44, location 46-60, temperature 64-96, condition 101-120, metrics 124-163, days from 175.
+#define FC_HEAD_DY          47
+#define FC_METRIC_DY        25
+// Location line on the weather page (panel-relative y; the panel stands 51 px above the glass, so 97 is
+// 46 px from the top, just under the title): "33.87S 151.21E | SYD 20 km S". The "N" marker moves down
+// to sit just under it.
+#define WEATHER_LOC_Y       97
+#define WX_NORTH_Y          117
+// The distance label ("75 KM") is the radius of the picture, i.e. the range of the OUTER ring, so it
+// sits on the outer ring (right-hand side) rather than near the middle ring as on the bigger boards.
+#define WX_RANGE_ON_OUTER_RING 1
+
 // ---------- Battery sense ----------
 // GPIO 1 (ADC1 channel 0) behind a divide-by-two divider; 12 dB attenuation;
 // V = raw * 3.3 / 4096 * 2. MEASURED: about 4.7 V on USB (the USB-fed rail), 4.16 V on battery.

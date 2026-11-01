@@ -8,12 +8,17 @@ int  ui_sweep_masks(int16_t out[][5], int max);   // logical x1,y1,x2,y2,radius:
 void ui_on_data_updated(void);   // refresh card/list/stats after radar::update()
 void ui_knob_selection_changed(void); // the knob changed the radar selection: hide the detail card now, show it after KNOB_CARD_DELAY_MS of stillness
 bool ui_card_visible(void);      // the aircraft detail card is on screen (used to measure the knob debounce)
+bool ui_list_active(void);       // the aircraft list is the tile on screen and not mid-swipe (the knob scrolls it then)
+bool ui_list_scroll(int steps);  // knob: move the list focus by `steps` rows (+ = down); false if already at an end or not a wheel board
+bool ui_weather_active(void);    // the weather page is the tile on screen and not mid-swipe (the knob changes its mode then)
+bool ui_weather_cycle(int steps);// knob: step the weather mode (radar / clouds / forecast) by `steps`, wrapping; false if unchanged
 void ui_show_view(int idx);      // 0 = radar, 1 = list, 2 = stats, 3 = weather
 void ui_set_view_changed_cb(void (*cb)(int idx));  // fired on swipe — lets main remember the last view
 void ui_set_status(bool wifiUp, bool feedOk, int rssi, const char *clock);  // HUD: signal bars (count=RSSI, colour: red=down, amber=stale feed, white=ok) + clock
 void ui_set_battery(int pct, bool charging, bool present);  // top HUD battery indicator
 void ui_set_date(const char *date);  // top HUD date line (e.g. "08 Jun 2026")
 void ui_set_netinfo(const char *line);  // stats view footer: how to reach the config page
+void ui_set_geo(double lat, double lon);  // the point the weather is for (home); shown on the weather page on boards that want it
 void ui_set_feed_source(const char *host);  // Stats "Feed" line: which ADS-B provider served the last data
 void ui_set_gps(int state, int sats, float altM);   // GPS indicator: state 0=off/hidden 1=acquiring 2=fix; HUD icon + Stats line (altM = GPS altitude, NAN if unknown)
 void ui_splash_show(void);  // branded boot splash (auto-fades, covers init time)
