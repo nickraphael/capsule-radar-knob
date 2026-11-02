@@ -164,6 +164,7 @@ struct AcDraw {
     bool       onGround;
     float      vsFpm, gsKt, distKm, bearingDeg;
     float      scrDeg;         // on-screen angle, degrees clockwise from 12 o'clock: bearing minus the scope rotation
+    uint8_t    kind;           // AC_KIND_*: what the aircraft list draws as its icon
     int        squawk;
     std::vector<lv_point_t> trail;
 };
@@ -174,6 +175,31 @@ static const float GX[4] = { 0.0f,  7.0f, 0.0f, -7.0f };
 static const float GY[4] = { -11.0f, 5.0f, 8.0f, 5.0f };
 
 static inline bool orb() { return s_theme == THEME_ORB; }
+
+// What an aircraft is drawn as in the aircraft list (fork-only): AC_KIND_HELI, AC_KIND_MIL or AC_KIND_PLANE.
+//  - Helicopter: the feed's emitter category "A7" (rotorcraft) when the aircraft broadcasts it, otherwise
+//    a table of ICAO rotorcraft type designators. The table is best effort: an unlisted helicopter shows
+//    as a plane.
+//  - Military: the database flag. A military helicopter stays a helicopter; every other military
+//    aircraft gets the jet icon (the owner's rule), whatever it is.
+//  - Everything else is an ordinary plane.
+static const char *const kRotorTypes[] = {
+    "R22", "R44", "R66", "H269", "EN28", "EN48", "G2CA",                       // Robinson, Hughes/Schweizer, Enstrom, Guimbal
+    "EC20", "EC25", "EC30", "EC35", "EC45", "EC55", "EC75", "H160",            // Airbus H120..H175 (old Eurocopter codes)
+    "AS32", "AS35", "AS50", "AS55", "AS65", "GAZL", "LAMA", "PUMA", "LYNX",    // Aerospatiale / Westland
+    "A109", "A119", "A139", "A169", "A189", "EH10",                            // Leonardo / AgustaWestland
+    "B06", "B06T", "B212", "B222", "B407", "B412", "B427", "B429", "B430", "B505", "B47G", "B47J", "UH1",   // Bell
+    "H500", "MD52", "MD60", "EXPL",                                            // MD Helicopters
+    "H60", "H64", "H47", "H53", "H58", "S61", "S76", "S92",                    // Sikorsky, Boeing military
+    "NH90", "BK17", "MI8", "MI24", "MI26", "KA32",                             // NHIndustries, Kawasaki/MBB, Russian
+};
+static uint8_t aircraft_kind(const Aircraft &a) {
+    if (a.cat[0] == 'A' && a.cat[1] == '7') return AC_KIND_HELI;
+    const char *t = a.type.c_str();
+    for (const char *r : kRotorTypes)
+        if (strcmp(t, r) == 0) return AC_KIND_HELI;
+    return a.military ? AC_KIND_MIL : AC_KIND_PLANE;
+}
 // The second hand's colour. Orb has no sweep and a green lead on a green scope: orange there.
 static inline lv_color_t clock_lead_color() { return orb() ? ORB_ACCENT : s_cLead; }
 
@@ -1032,6 +1058,7 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
         snprintf(d.hex,  sizeof(d.hex),  "%s", ac.hex.c_str());
         snprintf(d.call, sizeof(d.call), "%s", ac.flight.c_str());
         snprintf(d.type, sizeof(d.type), "%s", ac.type.c_str());
+        d.kind = aircraft_kind(ac);
         d.altFt = ac.altBaro;
         d.onGround = ac.onGround;
         d.vsFpm = ac.baroRate;
@@ -1132,7 +1159,7 @@ static void fill_info(const AcDraw &a, AcInfo &out) {
     out.altFt = a.altFt; out.onGround = a.onGround;
     out.vsFpm = a.vsFpm; out.gsKt = a.gsKt;
     out.distKm = a.distKm; out.bearingDeg = a.bearingDeg; out.track = a.track;
-    out.squawk = a.squawk; out.emergency = a.emergency;
+    out.squawk = a.squawk; out.emergency = a.emergency; out.kind = a.kind;
 }
 
 void select(int idx) {

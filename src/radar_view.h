@@ -22,6 +22,9 @@ enum RadarTheme {
     THEME_COUNT    = 4
 };
 
+// What an aircraft is drawn as in the aircraft list (fork-only): see aircraft_kind() in radar_view.cpp.
+enum { AC_KIND_PLANE = 0, AC_KIND_HELI = 1, AC_KIND_MIL = 2 };
+
 // Flattened, display-ready info for one aircraft (detail card / list view).
 struct AcInfo {
     char  hex[8];
@@ -36,6 +39,7 @@ struct AcInfo {
     float track;        // ground track deg (NaN if unknown) — the heading the glyph points
     int   squawk;       // -1 if unknown
     bool  emergency;
+    uint8_t kind;       // AC_KIND_PLANE / AC_KIND_HELI / AC_KIND_MIL: the icon the list draws
 };
 
 namespace radar {

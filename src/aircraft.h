@@ -23,6 +23,7 @@ struct Aircraft {
     int      squawk = -1;
     uint32_t seenPos = 0;    // s since last position
     bool     military = false;
+    char     cat[3] = {0, 0, 0};   // ADS-B emitter category from the feed, e.g. "A7" = rotorcraft ("" if not broadcast)
     uint32_t lastUpdateMs = 0; // millis() when we last saw it (for trails/expiry)
 };
 

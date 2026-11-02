@@ -112,6 +112,16 @@
 #define AC_LIST_H           252
 #define AC_ROW_H            48      // every row is exactly TWO lines of size-14 text; a fixed height is what makes overlong text end in "..." instead of growing
 #define AC_LIST_Y_OFFSET    14      // below the centre, clear of the title
+// The aircraft icon spans both text lines at the right of each row (32 px, twice its design size).
+// AC_ICON_PAD is the strip reserved at the row's right edge (text is centred in what is left of it);
+// AC_ICON_CX is the distance from the row's right edge to the icon's centre. The icon is kept toward
+// the middle of the row, not hard against the edge, so it clears the curve of the glass on the rows
+// above and below the focus.
+#define AC_ICON_PAD         52
+#define AC_ICON_CX          34
+// Icons on rows other than the outlined (selected) one are fainter: this is the strength, in percent of
+// the row's own fade, that an icon reaches one row away from the middle (100 = no extra fade).
+#define AC_ICON_FAINT_PCT   35
 
 // ---------- Stats and weather tiles on the round 360 glass ----------
 // Stats: offsets from the panel centre (px). The stats block is 7 lines of size-16 text (~126 px tall),
@@ -155,6 +165,21 @@
 // The distance label ("75 KM") is the radius of the picture, i.e. the range of the OUTER ring, so it
 // sits on the outer ring (right-hand side) rather than near the middle ring as on the bigger boards.
 #define WX_RANGE_ON_OUTER_RING 1
+
+// ---------- Defaults and identity (knob fork) ----------
+// config.h defines these for the upstream project BEFORE this header is included, so they are
+// #undef'd and redefined here (a plain #define would only warn, and the earlier value could win).
+//
+// The idle clock (or dim) starts after 60 s without a touch or knob turn; the shared default is 20 s.
+// A value saved from the config page ("Clock or dim after") still wins over this default.
+#undef  IDLE_DIM_MS
+#define IDLE_DIM_MS         60000
+// The weather page opens on the 3-day forecast instead of the radar.
+#define WEATHER_DEFAULT_FORECAST 1
+// This fork's own name and version: the Stats page, the config page footer and the boot log.
+#undef  FW_VERSION
+#define FW_VERSION          "1.0.0"
+#define FW_NAME             "Capsule Radar Knob"
 
 // ---------- Battery sense ----------
 // GPIO 1 (ADC1 channel 0) behind a divide-by-two divider; 12 dB attenuation;

@@ -1262,7 +1262,34 @@ void setup() {
         "input,select{background:#0c1a12!important;color:#eafff3!important;"
         "border:1px solid #2a4a39!important;border-radius:8px!important}"
         "a{color:#1dff86}.q{filter:hue-rotate(90deg)}"
-        "</style>");
+        "</style>"
+        // The portal's SSID text box becomes a dropdown of the scanned networks. WiFiManager's own list
+        // of clickable networks is hidden (the dropdown replaces it) and each choice calls the library's
+        // c() function, so the SSID box and the password box (off for an open network) behave exactly as
+        // when you tapped a name. The last-used network is preselected when it is in range, and "Other"
+        // brings the text box back for a hidden network. Option names are set with textContent, never as
+        // HTML, because a nearby network's name is untrusted input. If the script cannot run, or there are
+        // no scan results, the page is left as the library made it.
+        "<script>addEventListener('DOMContentLoaded',function(){"
+        "var s=document.getElementById('s'),p=document.getElementById('p');"
+        "if(!s||!p)return;"
+        "var L=[].slice.call(document.querySelectorAll('a[data-ssid]'));"
+        "if(!L.length)return;"
+        "var d=document.createElement('select');"
+        "d.id='ssidsel';"
+        "d.style.cssText='width:100%;margin:6px 0';"
+        "L.forEach(function(a,i){var o=document.createElement('option');o.value=i;o.textContent=a.getAttribute('data-ssid');d.appendChild(o)});"
+        "var x=document.createElement('option');"
+        "x.value='x';"
+        "x.textContent='Other (type the name)...';"
+        "d.appendChild(x);"
+        "function g(){if(d.value==='x'){s.value='';s.style.display='';p.disabled=false;s.focus()}else{s.style.display='none';c(L[d.value])}}"
+        "d.onchange=g;"
+        "s.parentNode.insertBefore(d,s);"
+        "L.forEach(function(a){a.parentNode.style.display='none'});"
+        "for(var i=0;i<L.length;i++)if(L[i].getAttribute('data-ssid')===s.placeholder)d.value=i;"
+        "g();"
+        "p.blur()});</script>");
     // After the portal saves new credentials, reboot for a clean start: WiFiManager's
     // own port-80 server (and mDNS) don't cleanly hand over to our web server / STA
     // interface in non-blocking mode, so the config page is flaky until a fresh boot.

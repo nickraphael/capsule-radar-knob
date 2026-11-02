@@ -45,7 +45,11 @@ static lv_obj_t *s_wxNorth = nullptr, *s_wxCenter = nullptr, *s_wxRange = nullpt
 static lv_obj_t *s_weatherModeBtn = nullptr, *s_weatherModeLbl = nullptr;
 static lv_obj_t *s_weatherTitle = nullptr;
 enum WeatherViewMode { WEATHER_RADAR, WEATHER_CLOUDS, WEATHER_FORECAST };
+#if defined(WEATHER_DEFAULT_FORECAST)
+static WeatherViewMode s_weatherMode = WEATHER_FORECAST;   // this board opens the weather page on the 3-day forecast
+#else
 static WeatherViewMode s_weatherMode = WEATHER_RADAR;
+#endif
 // The point the weather is for (the home position), set by main; shown on the weather page.
 static double s_geoLat = 0, s_geoLon = 0;
 static bool   s_geoValid = false;
@@ -582,6 +586,7 @@ static void list_tap_cb(lv_event_t *e) {
 // The list's vertical padding lets the first and last row reach the middle, so row k is centred at
 // scroll position k * pitch.
 #if defined(LIST_WHEEL)
+static std::vector<uint8_t> s_listRowKind;                 // what each row's icon is (AC_KIND_*), parallel to the rows
 static std::vector<uint8_t> s_listRowOpa;                  // opacity last applied to each row (255 = none)
 
 // Row text helpers. "1670 m" -> "1670m" (tighter, as in the two-line layout).
@@ -652,6 +657,109 @@ static void list_scroll_end_cb(lv_event_t *e) {
     card_hold_for_list();
 }
 
+// ---- list icons ----
+// An icon at the right of each row, spanning both lines of text: an ordinary plane, a military jet, or a helicopter.
+// They are drawn in ONE pass over the whole list (LV_EVENT_DRAW_POST), a few polygons each, so they cost
+// no objects per row and nothing from the 64 KB LVGL pool. They are simple original shapes in a +-8 px
+// box, drawn nose-up (the jet is then turned 45 degrees). LVGL's polygon fill wants CONVEX pieces, so
+// each icon is several. Coordinates are x right, y down, relative to the icon's centre.
+// Drawn at twice their design size (the +-8 design box becomes 32 px), so each spans both lines of text.
+static const float ICON_SCALE = 2.0f;
+struct IconPt { float x, y; };
+static const IconPt kPlaneBody[]  = { {0, -8}, {1.8f, -5}, {1.8f, 5}, {1, 8}, {-1, 8}, {-1.8f, 5}, {-1.8f, -5} };
+static const IconPt kPlaneWingR[] = { {1.8f, -2}, {8, 3}, {8, 5}, {1.8f, 2} };
+static const IconPt kPlaneWingL[] = { {-1.8f, -2}, {-8, 3}, {-8, 5}, {-1.8f, 2} };
+static const IconPt kPlaneTailR[] = { {1, 5}, {4, 7.5f}, {4, 8}, {1, 8} };
+static const IconPt kPlaneTailL[] = { {-1, 5}, {-4, 7.5f}, {-4, 8}, {-1, 8} };
+
+static const IconPt kJetBody[]    = { {0, -7}, {1.6f, -3}, {1.6f, 6}, {-1.6f, 6}, {-1.6f, -3} };
+static const IconPt kJetWingR[]   = { {1.6f, -1}, {6.5f, 6}, {1.6f, 5} };
+static const IconPt kJetWingL[]   = { {-1.6f, -1}, {-6.5f, 6}, {-1.6f, 5} };
+static const IconPt kJetCanardR[] = { {1.6f, -4.5f}, {3.5f, -3}, {1.6f, -3} };
+static const IconPt kJetCanardL[] = { {-1.6f, -4.5f}, {-3.5f, -3}, {-1.6f, -3} };
+
+// Helicopter, side view, facing right: cabin, tail boom and fin as polygons; rotor, mast and skids as lines.
+static const IconPt kHeliCabin[]  = { {-1, -3}, {4, -3}, {7, 0}, {6, 3}, {-1, 3} };
+static const IconPt kHeliBoom[]   = { {-8, -1}, {-1, -1}, {-1, 1}, {-8, 1} };
+static const IconPt kHeliFin[]    = { {-8, -1}, {-6, -1}, {-8, -4} };
+
+static void icon_poly(lv_draw_ctx_t *d, const lv_draw_rect_dsc_t *dsc, float cx, float cy, float rot,
+                      const IconPt *p, int n) {
+    lv_point_t pts[8];
+    const float c = cosf(rot), s = sinf(rot);
+    for (int i = 0; i < n && i < 8; ++i) {
+        const float px = p[i].x * ICON_SCALE, py = p[i].y * ICON_SCALE;
+        pts[i].x = (lv_coord_t)lroundf(cx + px * c - py * s);
+        pts[i].y = (lv_coord_t)lroundf(cy + px * s + py * c);
+    }
+    lv_draw_polygon(d, dsc, pts, (uint16_t)(n < 8 ? n : 8));
+}
+#define ICON_POLY(arr) icon_poly(d, &pd, cx, cy, rot, arr, (int)(sizeof(arr) / sizeof(arr[0])))
+
+static void icon_line(lv_draw_ctx_t *d, const lv_draw_line_dsc_t *ld, float cx, float cy,
+                      float x1, float y1, float x2, float y2) {
+    lv_point_t a = { (lv_coord_t)lroundf(cx + x1 * ICON_SCALE), (lv_coord_t)lroundf(cy + y1 * ICON_SCALE) };
+    lv_point_t b = { (lv_coord_t)lroundf(cx + x2 * ICON_SCALE), (lv_coord_t)lroundf(cy + y2 * ICON_SCALE) };
+    lv_draw_line(d, ld, &a, &b);
+}
+
+static void list_icons_cb(lv_event_t *e) {
+    lv_draw_ctx_t *d = lv_event_get_draw_ctx(e);
+    const int n = (int)s_listRows.size();
+    if (!d || n == 0 || s_listRowKind.size() != s_listRows.size() || s_listRowOpa.size() != s_listRows.size()) return;
+    lv_area_t la;
+    lv_obj_get_coords(s_list, &la);
+    const int c = list_centre_row();
+    const float centreF = (float)lv_obj_get_scroll_y(s_list) / list_pitch();   // fractional row index in the middle
+    for (int i = c - 4; i <= c + 4; ++i) {                      // only rows near the middle can be on screen
+        if (i < 0 || i >= n) continue;
+        lv_area_t ra;
+        lv_obj_get_coords(s_listRows[i], &ra);
+        if (ra.y2 < la.y1 || ra.y1 > la.y2) continue;
+        const lv_color_t col = s_listRowEmg[i] ? UI_EMERG : UI_INK;
+        // Fainter than the row's own text for every row but the outlined one: full strength in the middle,
+        // down to AC_ICON_FAINT_PCT of the row's fade one row away. Smooth in between, so a scrolling wheel
+        // brightens an icon as its row arrives instead of snapping.
+        const float dRow = fabsf((float)i - centreF);
+        const float faint = 1.0f - (1.0f - AC_ICON_FAINT_PCT / 100.0f) * (dRow < 1.0f ? dRow : 1.0f);
+        const lv_opa_t opa = (lv_opa_t)lroundf((float)s_listRowOpa[i] * faint);
+        lv_draw_rect_dsc_t pd;
+        lv_draw_rect_dsc_init(&pd);
+        pd.bg_color = col;
+        pd.bg_opa = opa;
+        pd.border_width = 0;
+        // At the right, centred on the row's height so it spans both lines of text; AC_ICON_CX keeps it
+        // toward the middle of the row, clear of the glass's curve on the rows above and below the focus.
+        const float cx = (float)(ra.x2 - AC_ICON_CX), cy = (float)(ra.y1 + AC_ROW_H / 2);
+        float rot = 0.0f;
+        switch (s_listRowKind[i]) {
+        case AC_KIND_HELI: {
+            ICON_POLY(kHeliCabin); ICON_POLY(kHeliBoom); ICON_POLY(kHeliFin);
+            lv_draw_line_dsc_t ld;
+            lv_draw_line_dsc_init(&ld);
+            ld.color = col;
+            ld.opa = opa;
+            ld.width = 2;                                       // 1 px at design size, doubled with the icon
+            icon_line(d, &ld, cx, cy, -8, -5, 8, -5);           // rotor
+            icon_line(d, &ld, cx, cy, 0, -5, 0, -3);            // mast
+            icon_line(d, &ld, cx, cy, -2, 5, 6, 5);             // skid
+            icon_line(d, &ld, cx, cy, 0, 3, 0, 5);              // struts
+            icon_line(d, &ld, cx, cy, 4, 3, 4, 5);
+            break;
+        }
+        case AC_KIND_MIL:
+            rot = 0.7853982f;                                   // pointing up and to the right (45 degrees)
+            ICON_POLY(kJetBody); ICON_POLY(kJetWingR); ICON_POLY(kJetWingL);
+            ICON_POLY(kJetCanardR); ICON_POLY(kJetCanardL);
+            break;
+        default:
+            ICON_POLY(kPlaneBody); ICON_POLY(kPlaneWingR); ICON_POLY(kPlaneWingL);
+            ICON_POLY(kPlaneTailR); ICON_POLY(kPlaneTailL);
+            break;
+        }
+    }
+}
+
 // The knob acts on the list only while the list is the tile on screen and not mid-swipe.
 bool ui_list_active(void) {
     return s_tv && s_list && lv_tileview_get_tile_act(s_tv) == s_tileList && !lv_obj_is_scrolling(s_tv);
@@ -688,6 +796,7 @@ static void build_list(void) {
         // a content-sized one grows instead, which spilled out of the focus box.
         lv_style_set_height(&s_rowStyle, AC_ROW_H);
         lv_style_set_pad_hor(&s_rowStyle, 10);                        // more room for the long second line
+        lv_style_set_pad_right(&s_rowStyle, AC_ICON_PAD);             // ...but a strip at the right for the icon, which spans both lines
         lv_style_set_pad_ver(&s_rowStyle, 6);                         // two lines (2 x 16 px + 2 px gap) fit the 48 px row
         lv_style_set_text_font(&s_rowStyle, F14());                   // the worst second line is ~290 px at size 14
         lv_style_set_text_line_space(&s_rowStyle, 2);
@@ -716,21 +825,21 @@ static void build_list(void) {
         fmt_alt(altS, sizeof(altS), in.altFt, in.onGround);
 #if defined(LIST_WHEEL)
         // Two lines per aircraft, in ONE label (the 64 KB LVGL pool is tight):
-        //   QFA537    B738
-        //   ALT 1670m  DIST 2.4km  SPD 156km/h
+        //   QFA537   B738   DIST 2.4km
+        //   ALT 1670m  SPD 156km/h
+        // (DIST is on line 1 so line 2 is short and the icon can sit at the right spanning both lines.)
         // Units follow the user's unit setting through the same helpers as the detail card. Line 1 is
         // brighter through LVGL's inline recolour; an emergency row skips it and stays all red.
-        char spdS[16], c1[16], ty[12], head[40];
+        char spdS[16], c1[16], ty[12], head[64];
         squeeze_spaces(altS);                                     // "1670 m" -> "1670m"
         fmt_spd(spdS, sizeof(spdS), in.gsKt);
         squeeze_spaces(spdS);                                     // "156 km/h" -> "156km/h"
         plain_text(c1, sizeof(c1), in.call[0] ? in.call : in.hex);
         plain_text(ty, sizeof(ty), in.type);
-        if (ty[0]) snprintf(head, sizeof(head), "%s    %s", c1, ty);
-        else       snprintf(head, sizeof(head), "%s", c1);
-        snprintf(txt, sizeof(txt), "%s%s%s\nALT %s  DIST %.1f%s  SPD %s",
-                 in.emergency ? "" : "#EAFFF3 ", head, in.emergency ? "" : "#",
-                 altS, dist_val(in.distKm), dist_unit(), spdS);
+        if (ty[0]) snprintf(head, sizeof(head), "%s   %s   DIST %.1f%s", c1, ty, dist_val(in.distKm), dist_unit());
+        else       snprintf(head, sizeof(head), "%s   DIST %.1f%s", c1, dist_val(in.distKm), dist_unit());
+        snprintf(txt, sizeof(txt), "%s%s%s\nALT %s  SPD %s",
+                 in.emergency ? "" : "#EAFFF3 ", head, in.emergency ? "" : "#", altS, spdS);
 #else
         snprintf(txt, sizeof(txt), "%-8.8s  %-8s %4.1f %s",
                  in.call[0] ? in.call : in.hex, altS, dist_val(in.distKm), dist_unit());
@@ -738,6 +847,9 @@ static void build_list(void) {
         if (i < (int)s_listRows.size()) {          // existing row: just refresh its content
             lv_obj_t *l = s_listRows[i];
             lv_label_set_text(l, txt);
+#if defined(LIST_WHEEL)
+            s_listRowKind[i] = in.kind;                // the icon follows the aircraft now in this row
+#endif
             if (s_listRowEmg[i] != in.emergency) {
                 if (in.emergency) lv_obj_add_style(l, &s_rowEmgStyle, 0);
                 else              lv_obj_remove_style(l, &s_rowEmgStyle, 0);
@@ -755,6 +867,7 @@ static void build_list(void) {
             lv_obj_add_flag(l, LV_OBJ_FLAG_SNAPPABLE);     // a finger drag settles on a row
             lv_label_set_recolor(l, true);                 // line 1 is brighter (inline colour markup)
             s_listRowOpa.push_back(255);
+            s_listRowKind.push_back(in.kind);
 #endif
         }
     }
@@ -766,6 +879,7 @@ static void build_list(void) {
         s_listRowEmg.erase(s_listRowEmg.begin() + i);
 #if defined(LIST_WHEEL)
         s_listRowOpa.erase(s_listRowOpa.begin() + i);
+        s_listRowKind.erase(s_listRowKind.begin() + i);
 #endif
     }
 #if defined(LIST_WHEEL)
@@ -1158,6 +1272,11 @@ static lv_obj_t *make_tile_title(lv_obj_t *tile, const char *txt) {
 #define FC_METRIC_DY 0
 #endif
 
+// Product name on the Stats page, before the version. A board header can override it (the knob fork does).
+#ifndef FW_NAME
+#define FW_NAME "Capsule Radar"
+#endif
+
 // Stats tile layout: offsets from the panel centre (px). The defaults suit the 466 px boards; a board
 // header can pull them in for a smaller round glass.
 #ifndef STATS_LBL_Y
@@ -1468,6 +1587,7 @@ void ui_create(void) {
         lv_obj_set_scroll_snap_y(s_list, LV_SCROLL_SNAP_CENTER);
         lv_obj_add_event_cb(s_list, list_scroll_cb, LV_EVENT_SCROLL, NULL);
         lv_obj_add_event_cb(s_list, list_scroll_end_cb, LV_EVENT_SCROLL_END, NULL);   // list -> radar selection sync
+        lv_obj_add_event_cb(s_list, list_icons_cb, LV_EVENT_DRAW_POST, NULL);        // plane / jet / helicopter icons, drawn over the rows
         lv_obj_t *band = lv_obj_create(lp);                            // created after the list: drawn over it
         lv_obj_remove_style_all(band);
         lv_obj_set_size(band, AC_LIST_W - 4, AC_ROW_H + 4);            // the row, with a little air around it
@@ -1544,7 +1664,7 @@ void ui_create(void) {
     lv_obj_t *ver = lv_label_create(sp);            // firmware version (so users can tell what's flashed)
     lv_obj_set_style_text_font(ver, F12(), 0);
     lv_obj_set_style_text_color(ver, UI_DIM, 0);
-    lv_label_set_text(ver, "Capsule Radar v" FW_VERSION);
+    lv_label_set_text(ver, FW_NAME " v" FW_VERSION);
     lv_obj_align(ver, LV_ALIGN_CENTER, 0, STATS_VER_Y);
 
     // --- weather tile (current conditions + next three days) ---
