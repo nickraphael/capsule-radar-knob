@@ -1189,8 +1189,14 @@ void setup() {
         g_adsb.setMinAltFt((float)g_minAltFt);
         g_adsb.setMaxAltFt((float)g_maxAltFt);
         g_adsb.setMilitaryOnly(g_milOnly);
-        // restore the last active view (car installs power-cycle constantly) and keep
+        // Other boards: restore the last active view (car installs power-cycle constantly) and keep
         // remembering it; NVS write only when the view actually changes.
+#if defined(BOOT_VIEW)
+        // This board always opens on one fixed page (BOOT_VIEW) instead of the one last left, so there is
+        // nothing to remember: the flash write the callback below does at the end of every page change is
+        // skipped too.
+        ui_show_view(BOOT_VIEW);
+#else
         ui_show_view(g_lastView);
         ui_set_view_changed_cb([](int idx) {
             if (idx == g_lastView) return;
@@ -1200,6 +1206,18 @@ void setup() {
             q.putInt("lastview", idx);
             q.end();
         });
+#endif
+#if defined(PIN_ENC_A)
+        // Frame-time diagnostic: one serial line per swipe between pages, with how many frames LVGL drew,
+        // the average and worst time per frame, and the pixels per frame. Page: 0 radar, 1 list, 2 stats,
+        // 3 weather. A swipe that feels laggy shows as a high average or worst time.
+        ui_set_swipe_cb([](bool begin, int view) {
+            if (begin) { display::perfReset(); return; }
+            char tag[40];
+            snprintf(tag, sizeof(tag), "swipe settled on page %d", view);
+            display::perfLog(tag);
+        });
+#endif
         radar::setTrailLength(g_trailLen);
         radar::setMaxOnScreen(g_maxAc);
         display::setRotation((uint16_t)g_rotation);
@@ -1375,6 +1393,7 @@ void setup() {
 
 void loop() {
     display::loop();                // drive LVGL (render dirty areas + run timers)
+    ui_service();                   // then run a page slide the swipe handler queued (a no-op on boards without it)
     g_wm.process();                 // service the WiFi config portal (non-blocking)
     g_web.handleClient();           // serve the configuration web page
     if (g_useGps) gps_poll();       // pull NMEA from the LC76G (only when GPS auto-location is on)

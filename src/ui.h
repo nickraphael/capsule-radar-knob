@@ -13,6 +13,8 @@ bool ui_list_scroll(int steps);  // knob: move the list focus by `steps` rows (+
 bool ui_weather_active(void);    // the weather page is the tile on screen and not mid-swipe (the knob changes its mode then)
 bool ui_weather_cycle(int steps);// knob: step the weather mode (radar / clouds / forecast) by `steps`, wrapping; false if unchanged
 void ui_show_view(int idx);      // 0 = radar, 1 = list, 2 = stats, 3 = weather
+void ui_service(void);           // run a page slide the swipe handler queued (call from the main loop right after display::loop())
+void ui_set_swipe_cb(void (*cb)(bool begin, int view));  // fired when a swipe between pages starts / has settled (frame-time diagnostic)
 void ui_set_view_changed_cb(void (*cb)(int idx));  // fired on swipe — lets main remember the last view
 void ui_set_status(bool wifiUp, bool feedOk, int rssi, const char *clock);  // HUD: signal bars (count=RSSI, colour: red=down, amber=stale feed, white=ok) + clock
 void ui_set_battery(int pct, bool charging, bool present);  // top HUD battery indicator

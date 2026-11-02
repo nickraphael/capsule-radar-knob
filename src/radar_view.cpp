@@ -13,6 +13,9 @@
 #include "airports.h"
 #include "clock_face.h"
 #include <lvgl.h>
+#if defined(ARDUINO)
+#include <Arduino.h>              // millis() / Serial for the reprojection timing line in update()
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -47,7 +50,13 @@
 // altitude-trail palette so land never reads as an aircraft track.
 #define COAST_COLOR lv_color_hex(0x4E86C6)
 // airport markers — a neutral muted grey-blue so they sit quietly under the traffic.
+#if defined(AIRPORT_SELECT)
+#define AIRPORT_COLOR lv_color_hex(AIRPORT_MARK_HEX)   // bright magenta crosses (airports.h)
+#define AIRPORT_OPA   255
+#else
 #define AIRPORT_COLOR lv_color_hex(0x8A93A6)
+#define AIRPORT_OPA   150
+#endif
 // ---- orb palette (Orb) ----
 #define ORB_BLIP   lv_color_hex(0xFFE11A)
 #define ORB_EMERG  lv_color_hex(0xFF4D2E)
@@ -108,6 +117,16 @@ static uint32_t    s_pollMs       = POLL_INTERVAL_MS;
 static int         s_frameCtr     = 0;
 static lv_coord_t  s_cx = SCREEN_CX, s_cy = SCREEN_CY;
 static std::string s_selHex;
+#if defined(AIRPORT_SELECT)
+#define AP_CODE_BASE          100000   // hitTest() / select(): a value from here up means "airport number value - AP_CODE_BASE"
+#define AIRPORT_TAP_RADIUS_PX 26       // finger-tap catch radius for an airport cross (aircraft use TAP_RADIUS_PX)
+// A selection key "@<n>" names airport n of the embedded table (airports.h); an aircraft's key is its hex.
+static bool sel_airport(int *idx) {
+    if (s_selHex.size() < 2 || s_selHex[0] != '@') return false;
+    *idx = atoi(s_selHex.c_str() + 1);
+    return true;
+}
+#endif
 
 // ---- idle clock ----
 static ClockFace   s_clock;
@@ -125,6 +144,20 @@ static ClockHands  s_wall = {};                 // last good wall time
 
 // Scale an opacity by the clock's scene dim (255 = radar as usual).
 static inline lv_opa_t dim(int opa) { return (lv_opa_t)((opa * s_dimOpa + 127) / 255); }
+
+#if defined(SEL_FLASH_MS)
+// The selected aircraft's ring pulses (fork-only, boards that define SEL_FLASH_MS): its opacity is a
+// triangle wave between SEL_FLASH_MIN_OPA and full, SEL_FLASH_MS per cycle. The strength is computed
+// from the clock at draw time; flash_step() below just makes sure the ring's small area is repainted.
+#ifndef SEL_FLASH_MIN_OPA
+#define SEL_FLASH_MIN_OPA 45
+#endif
+static lv_opa_t flash_opa() {
+    const float ph = (float)(lv_tick_get() % (uint32_t)SEL_FLASH_MS) / (float)SEL_FLASH_MS;
+    const float tri = ph < 0.5f ? ph * 2.0f : (1.0f - ph) * 2.0f;          // 0 -> 1 -> 0 over one cycle
+    return (lv_opa_t)(SEL_FLASH_MIN_OPA + (255 - SEL_FLASH_MIN_OPA) * tri);
+}
+#endif
 
 // Default time source: the system clock (RTC-seeded, NTP-synced) in the configured zone.
 // Before 2023-11-14 the clock was never set: no clock face then.
@@ -323,7 +356,7 @@ static void grid_draw_cb(lv_event_t *e) {
         td.border_width = 1;
         td.border_opa = dim(160);
         coastline_draw(d, COAST_COLOR, dim(170), 2);    // landmass outline under the triangle
-        if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, dim(150));
+        if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, dim(AIRPORT_OPA));
         lv_draw_polygon(d, &td, tri, 3);
         return;
     }
@@ -331,7 +364,7 @@ static void grid_draw_cb(lv_event_t *e) {
     // coastline first, so the rings/crosshair sit cleanly on top of it.
     // Steel blue + 2 px so it reads as a map outline, distinct from the green altitude trails.
     coastline_draw(d, COAST_COLOR, dim(165), 2);
-    if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, dim(150));
+    if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, dim(AIRPORT_OPA));
 
     // phosphor: concentric rings + crosshair
     lv_draw_arc_dsc_t ad;
@@ -442,6 +475,34 @@ static void interp_step(void) {
 #endif
 }
 
+#if defined(SEL_FLASH_MS)
+// Repaint the small area around the selected aircraft so its pulsing ring animates. Only that box is
+// invalidated (the glide step does the same for moving glyphs), so the cost is a few hundred pixels per
+// tick. Skipped while the idle clock is up (the scene is dimmed and the ring is not drawn then) and while
+// the radar is not on screen.
+static void flash_step(void) {
+    if (!s_acLayer || s_selHex.empty() || s_clockStage != 0 || !lv_obj_is_visible(s_acLayer)) return;
+#if defined(AIRPORT_SELECT)
+    int apIdx;
+    lv_point_t apPt;
+    if (sel_airport(&apIdx)) {                                       // a selected airport pulses in the same way
+        if (airports_pos(apIdx, &apPt)) {
+            lv_area_t a = { (lv_coord_t)(apPt.x - 28), (lv_coord_t)(apPt.y - 28),
+                            (lv_coord_t)(apPt.x + 28), (lv_coord_t)(apPt.y + 28) };
+            lv_obj_invalidate_area(s_acLayer, &a);
+        }
+        return;
+    }
+#endif
+    for_each_drawn([](size_t, const AcDraw &ac) {
+        if (s_selHex != ac.hex) return;
+        lv_area_t a = { (lv_coord_t)(ac.pos.x - 28), (lv_coord_t)(ac.pos.y - 28),
+                        (lv_coord_t)(ac.pos.x + 28), (lv_coord_t)(ac.pos.y + 28) };
+        lv_obj_invalidate_area(s_acLayer, &a);
+    });
+}
+#endif
+
 namespace radar { static void sweep_sync(); }
 
 // One scene step of the idle clock (ClockFrame::stage): dim the scene, hide the labels, swap
@@ -489,6 +550,9 @@ static void clock_tick() {
 static void sweep_timer_cb(lv_timer_t *t) {
     (void)t;
     if (++s_frameCtr % 3 == 0) interp_step();         // smooth glyph motion (~90 ms cadence)
+#if defined(SEL_FLASH_MS)
+    if (s_frameCtr % 3 == 1) flash_step();            // the selected aircraft's pulsing ring (same ~90 ms cadence, offset one tick)
+#endif
     clock_tick();                                      // before the Orb / sweep-off returns below
     if (orb()) {
         // animate the blip waves (invalidate only the ball areas)
@@ -636,14 +700,24 @@ static void ac_draw_cb(lv_event_t *e) {
             lv_draw_arc_dsc_t sr;
             lv_draw_arc_dsc_init(&sr);
             sr.width = 2;
+#if defined(SEL_FLASH_MS)
+            sr.opa = dim(flash_opa());                         // pulses; flash_step() repaints this small area
+#else
             sr.opa = dim(240);
+#endif
             if (drg) {
                 sr.color = ORB_ACCENT;
                 lv_draw_arc(d, &sr, &ac.pos, 15, 0, 360);
                 lv_draw_arc(d, &sr, &ac.pos, 23, 0, 360);
             } else {
                 sr.color = ac.emergency ? COL_EMERG : s_cInk;
+#if defined(SEL_FLASH_MS)
+                // A small circle close around the glyph. An emergency aircraft already has a red ring at
+                // radius 16, so its selection circle sits just outside that.
+                lv_draw_arc(d, &sr, &ac.pos, ac.emergency ? 21 : 16, 0, 360);
+#else
                 lv_draw_arc(d, &sr, &ac.pos, 19, 0, 360);
+#endif
             }
         }
 
@@ -656,15 +730,40 @@ static void ac_draw_cb(lv_event_t *e) {
             lc.color = s_cInk;
             lv_area_t a1 = { (lv_coord_t)(ac.pos.x + 12), (lv_coord_t)(ac.pos.y - 14),
                              (lv_coord_t)(ac.pos.x + 168), (lv_coord_t)(ac.pos.y + 4) };
-            if (ac.call[0]) lv_draw_label(d, &lc, &a1, ac.call, NULL);
+#if defined(LABELS_SELECTED_ONLY)
+            // With an aircraft selected only ITS flight code and altitude are drawn; with none selected, all of
+            // them. (The selection changes always repaint this whole layer, so the others' text vanishes/returns
+            // at once.) The name `showCall` covers both lines of text.
+            const bool showCall = s_selHex.empty() || s_selHex == ac.hex;
+#else
+            const bool showCall = true;
+#endif
+            if (showCall && ac.call[0]) lv_draw_label(d, &lc, &a1, ac.call, NULL);
             lv_draw_label_dsc_t la;
             lv_draw_label_dsc_init(&la);
             la.font = s_bigText ? &lv_font_montserrat_16 : &lv_font_montserrat_12;
             la.color = ac.color;
             lv_area_t a2 = { a1.x1, (lv_coord_t)(ac.pos.y + 4), a1.x2, (lv_coord_t)(ac.pos.y + 26) };
-            if (ac.altTxt[0]) lv_draw_label(d, &la, &a2, ac.altTxt, NULL);
+            if (showCall && ac.altTxt[0]) lv_draw_label(d, &la, &a2, ac.altTxt, NULL);   // altitude follows the flight code's rule
         }
     });
+#if defined(AIRPORT_SELECT)
+    // A selected airport gets the same pulsing circle a selected aircraft does (flash_step() repaints this area).
+    int apIdx;
+    lv_point_t apPt;
+    if (sel_airport(&apIdx) && airports_pos(apIdx, &apPt)) {
+        lv_draw_arc_dsc_t sr;
+        lv_draw_arc_dsc_init(&sr);
+        sr.width = 2;
+        sr.color = AIRPORT_COLOR;
+#if defined(SEL_FLASH_MS)
+        sr.opa = dim(flash_opa());
+#else
+        sr.opa = dim(240);
+#endif
+        lv_draw_arc(d, &sr, &apPt, 14, 0, 360);
+    }
+#endif
 }
 
 // =============================== idle clock ==================================
@@ -1010,8 +1109,26 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
     if (s.homeLat != s_coLat || s.homeLon != s_coLon || s.rangeKm != s_coRange) {
         const bool firstFix = (s_coRange < 0.0f);
         s_coLat = s.homeLat; s_coLon = s.homeLon; s_coRange = s.rangeKm;
+#if defined(ARDUINO)
+        const uint32_t pjT0 = millis();
+#endif
         coastline_project(s.homeLat, s.homeLon, s.rangeKm, s_cx, s_cy, R);
+#if defined(ARDUINO)
+        const uint32_t pjT1 = millis();
+#endif
         airports_project(s.homeLat, s.homeLon, s.rangeKm, s_cx, s_cy, R);
+#if defined(ARDUINO)
+        // How long a zoom / home change blocks the UI (the coastline scan is double-precision maths).
+        Serial.printf("[radar] scope reprojected for %.0f km: coastline %lu ms, airports %lu ms\n", (double)s.rangeKm,
+                      (unsigned long)(pjT1 - pjT0), (unsigned long)(millis() - pjT1));
+#endif
+#if defined(AIRPORT_SELECT)
+        {   // a zoom or a new centre can leave the selected airport outside the scope: then it is no longer selected
+            int apIdx;
+            APInfo apInfo;
+            if (sel_airport(&apIdx) && !airports_info_by_index(apIdx, &apInfo)) s_selHex.clear();
+        }
+#endif
         if (s_gridLayer) lv_obj_invalidate(s_gridLayer);
         if (!firstFix) {
             // Scope scale/center changed: old trails were plotted at the previous
@@ -1099,7 +1216,7 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
         if (present.find(it->first) == present.end()) it = s_trails.erase(it);
         else ++it;
     }
-    if (!s_selHex.empty() && present.find(s_selHex) == present.end()) s_selHex.clear();
+    if (!s_selHex.empty() && s_selHex[0] != '@' && present.find(s_selHex) == present.end()) s_selHex.clear();   // the aircraft left the feed ('@n' is an airport key, not an aircraft)
 
     // Fade the flow layer by AGE, not just count: drop segments older than s_flowGenMax
     // polls so old tracks self-clear even in busy airspace (a 5 nm view doesn't stay caked
@@ -1149,6 +1266,14 @@ int hitTest(int x, int y) {
         const long dd = dx * dx + dy * dy;
         if (dd <= bestD) { bestD = dd; best = (int)i; }
     });
+#if defined(AIRPORT_SELECT)
+    // No aircraft under the finger: an airport cross may be. Returned as AP_CODE_BASE + table index, which
+    // select() understands (an aircraft's value is its small snapshot index).
+    if (best < 0 && s_airportsEnabled) {
+        const int ap = airports_hit(x, y, AIRPORT_TAP_RADIUS_PX);
+        if (ap >= 0) return AP_CODE_BASE + ap;
+    }
+#endif
     return best;
 }
 
@@ -1162,13 +1287,50 @@ static void fill_info(const AcDraw &a, AcInfo &out) {
     out.squawk = a.squawk; out.emergency = a.emergency; out.kind = a.kind;
 }
 
+#if defined(AIRPORT_SELECT)
+// An airport as the card and the list see it: kind AC_KIND_AIRPORT, the IATA code (else ICAO) in `call`, and
+// the selection key "@<table index>" in `hex`. The card and the list look the rest up by that index.
+static void fill_airport(const APInfo &a, AcInfo &out) {
+    memset(&out, 0, sizeof(out));
+    snprintf(out.hex, sizeof(out.hex), "@%d", a.idx);
+    snprintf(out.call, sizeof(out.call), "%s", a.iata[0] ? a.iata : a.icao);
+    out.altFt = 0.0f; out.onGround = false;
+    out.vsFpm = NAN; out.gsKt = NAN; out.track = NAN;
+    out.distKm = a.distKm; out.bearingDeg = a.bearingDeg;
+    out.squawk = -1; out.emergency = false; out.kind = AC_KIND_AIRPORT;
+}
+#endif
+
 void select(int idx) {
+#if defined(AIRPORT_SELECT)
+    if (idx >= AP_CODE_BASE) {                                       // an airport (from hitTest)
+        APInfo a;
+        if (s_airportsEnabled && airports_info_by_index(idx - AP_CODE_BASE, &a)) {
+            char key[12];
+            snprintf(key, sizeof(key), "@%d", idx - AP_CODE_BASE);
+            s_selHex = key;
+        } else {
+            s_selHex.clear();
+        }
+        if (s_acLayer) lv_obj_invalidate(s_acLayer);
+        return;
+    }
+#endif
     if (idx < 0 || idx >= (int)s_acs.size()) s_selHex.clear();
     else s_selHex = s_acs[idx].hex;
     if (s_acLayer) lv_obj_invalidate(s_acLayer);
 }
 
 bool selectHex(const char *hex) {
+#if defined(AIRPORT_SELECT)
+    if (hex && hex[0] == '@') {                                      // an airport key: valid while it is inside the scope
+        APInfo a;
+        if (!s_airportsEnabled || !airports_info_by_index(atoi(hex + 1), &a)) return false;
+        s_selHex = hex;
+        if (s_acLayer) lv_obj_invalidate(s_acLayer);
+        return true;
+    }
+#endif
     for (const AcDraw &a : s_acs)
         if (strcmp(a.hex, hex) == 0) {
             s_selHex = a.hex;
@@ -1180,6 +1342,15 @@ bool selectHex(const char *hex) {
 
 bool selected(AcInfo &out) {
     if (s_selHex.empty()) return false;
+#if defined(AIRPORT_SELECT)
+    int apIdx;
+    if (sel_airport(&apIdx)) {                                       // an airport: selected while it is inside the scope
+        APInfo a;
+        if (!s_airportsEnabled || !airports_info_by_index(apIdx, &a)) return false;
+        fill_airport(a, out);
+        return true;
+    }
+#endif
     for (const AcDraw &a : s_acs)
         if (s_selHex == a.hex) { fill_info(a, out); return true; }
     return false;
@@ -1194,28 +1365,51 @@ bool selected(AcInfo &out) {
 bool cycleSelection(int steps) {
     if (steps == 0) return false;
 
-    struct Slot { size_t idx; long angKey; float dist; };
+    struct Slot { size_t idx; int ap; long angKey; float dist; };   // ap >= 0: an airport (its table index), idx unused
     std::vector<Slot> ring;
     for_each_drawn([&](size_t i, const AcDraw &ac) {
-        ring.push_back({ i, lroundf(ac.scrDeg * 10.0f), ac.distKm });   // 0.1 degree buckets: near-ties go by distance
+        ring.push_back({ i, -1, lroundf(ac.scrDeg * 10.0f), ac.distKm });   // 0.1 degree buckets: near-ties go by distance
     });
+#if defined(AIRPORT_SELECT)
+    if (s_airportsEnabled) {                       // the airports inside the scope are stops too, placed by their on-screen angle
+        const int na = airports_visible_count();
+        for (int k = 0; k < na; ++k) {
+            APInfo a;
+            if (!airports_visible_info(k, &a)) continue;
+            float deg = atan2f((float)(a.pos.x - s_cx), (float)(s_cy - a.pos.y)) * 57.29578f;   // clockwise from 12 o'clock
+            if (deg < 0.0f) deg += 360.0f;
+            ring.push_back({ 0, a.idx, lroundf(deg * 10.0f), a.distKm });
+        }
+    }
+#endif
     std::sort(ring.begin(), ring.end(), [](const Slot &a, const Slot &b) {
         return a.angKey != b.angKey ? a.angKey < b.angKey : a.dist < b.dist;
     });
+    auto slot_is_selected = [&](const Slot &sl) {
+        if (sl.ap >= 0) { char key[12]; snprintf(key, sizeof(key), "@%d", sl.ap); return s_selHex == key; }
+        return s_selHex == s_acs[sl.idx].hex;
+    };
 
     const int n = (int)ring.size();
-    const int stops = n + 1;                       // the aircraft, then "none"
+    const int stops = n + 1;                       // the aircraft and airports, then "none"
     int cur = n;                                   // nothing selected = the "none" stop
     if (!s_selHex.empty()) {
         for (int k = 0; k < n; ++k)
-            if (s_selHex == s_acs[ring[k].idx].hex) { cur = k; break; }
+            if (slot_is_selected(ring[k])) { cur = k; break; }
     }
     int next = (cur + steps) % stops;
     if (next < 0) next += stops;
 
     const std::string before = s_selHex;
-    if (next == n) s_selHex.clear();
-    else           s_selHex = s_acs[ring[next].idx].hex;
+    if (next == n) {
+        s_selHex.clear();
+    } else if (ring[next].ap >= 0) {
+        char key[12];
+        snprintf(key, sizeof(key), "@%d", ring[next].ap);
+        s_selHex = key;
+    } else {
+        s_selHex = s_acs[ring[next].idx].hex;
+    }
     const bool changed = (s_selHex != before);
     if (changed && s_acLayer) lv_obj_invalidate(s_acLayer);
     return changed;
@@ -1227,6 +1421,27 @@ int countInRange() {
     int n = 0;
     for (const AcDraw &a : s_acs) if (a.inRange) ++n;
     return n;
+}
+
+// The airports inside the scope, for the list (see radar_view.h). Zero unless the board has them switched on.
+int airportCount() {
+#if defined(AIRPORT_SELECT)
+    return s_airportsEnabled ? airports_visible_count() : 0;
+#else
+    return 0;
+#endif
+}
+
+bool airportInfo(int k, AcInfo &out) {
+#if defined(AIRPORT_SELECT)
+    APInfo a;
+    if (!s_airportsEnabled || !airports_visible_info(k, &a)) return false;
+    fill_airport(a, out);
+    return true;
+#else
+    (void)k; (void)out;
+    return false;
+#endif
 }
 
 bool info(int idx, AcInfo &out) {

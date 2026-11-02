@@ -15,7 +15,29 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#if defined(ESP_PLATFORM)
+#include <esp_heap_caps.h>        // PSRAM allocation for the pre-scaled weather picture
+#endif
 #include <vector>
+#if defined(SWIPE_SLIDE)
+#include "display.h"              // page slide: offscreen render of the next page, then slide (fork-only)
+#endif
+#if defined(AIRPORT_SELECT)
+#include "airports.h"             // the airport info card and list rows (fork-only)
+#include <time.h>
+#endif
+
+// The weather radar / cloud picture is WX_RADAR_SIZE px across, shown 1:1 (it is a crop of a larger
+// source image, so a smaller canvas would show LESS area, not the same area smaller). On a round glass of
+// about that size it fills the whole screen edge to edge and looks zoomed in, where the 466 px boards
+// leave ~53 px of margin around it. WX_VIEW_D is the diameter it is SHOWN at: when it is smaller than
+// WX_RADAR_SIZE the picture is scaled down once, into its own buffer, whenever a new one arrives
+// (wx_prescale), with its rings and labels scaled to match, so it shows the same area, just smaller.
+// Default: unscaled. This sits up here, ahead of every use: an undefined macro in "#if WX_VIEW_D != ..."
+// counts as 0, which would silently compile the scaling code on boards that never set it.
+#ifndef WX_VIEW_D
+#define WX_VIEW_D WX_RADAR_SIZE
+#endif
 
 #define UI_GREEN lv_color_hex(0x1DFF86)
 #define UI_INK   lv_color_hex(0xEAFFF3)
@@ -164,10 +186,15 @@ static bool s_clockUp = false;
 #endif
 static bool        s_cardHold = false;
 static lv_timer_t *s_cardHoldTimer = nullptr;
+// Tapping the radar's background hides the card but keeps the selection (boards that define
+// KEEP_SELECTION_ON_BG_TAP). This holds the hex of the aircraft whose card was dismissed: the card stays
+// hidden only while that SAME aircraft stays selected, so any other selection (or none) ends it.
+static char        s_dismissedHex[8] = {0};
 static bool        s_listHold = false;     // the hold was set by the aircraft list (released when the radar tile returns)
 static void card_hold_cancel(void) {
     s_cardHold = false;
     s_listHold = false;
+    s_dismissedHex[0] = 0;                     // callers are deliberate selections: show the card
     if (s_cardHoldTimer) lv_timer_pause(s_cardHoldTimer);
 }
 // The aircraft list changed the selection. The radar's card sits on a tile nobody can see, and every
@@ -179,10 +206,60 @@ static void card_hold_for_list(void) {
     if (s_cardHoldTimer) lv_timer_pause(s_cardHoldTimer);
 }
 
+#if defined(AIRPORT_SELECT)
+// The info card for a selected airport (fork-only): the aircraft card's own widgets, with airport facts in
+// their places. Title: IATA and ICAO codes. Left: the airport's local time (daylight saving included, from
+// its own time-zone rule, so it is right whatever zone the radar is in), distance, elevation. Right: bearing,
+// the UTC offset, country. Bottom line: the name. No route or photo lookup happens for an airport.
+static void airport_card(const AcInfo &in) {
+    APInfo a;
+    if (!airports_info_by_index(atoi(in.hex + 1), &a)) return;
+
+    char timeS[8] = "--:--", zoneS[16] = "-";
+    int hh = 0, mm = 0, offMin = 0;
+    const time_t now = time(nullptr);
+    if (now > 1700000000 && airports_local_time(a, (int64_t)now, &hh, &mm, &offMin)) {   // only once the clock has been set
+        snprintf(timeS, sizeof(timeS), "%02d:%02d", hh, mm);
+        const int ao = offMin < 0 ? -offMin : offMin;
+        if (ao % 60) snprintf(zoneS, sizeof(zoneS), "UTC%c%d:%02d", offMin < 0 ? '-' : '+', ao / 60, ao % 60);
+        else         snprintf(zoneS, sizeof(zoneS), "UTC%c%d", offMin < 0 ? '-' : '+', ao / 60);
+    }
+
+    char title[40];
+    if (a.iata[0] && a.icao[0]) snprintf(title, sizeof(title), "%s  %s", a.iata, a.icao);
+    else                        snprintf(title, sizeof(title), "%s", a.iata[0] ? a.iata : (a.icao[0] ? a.icao : "-"));
+    fold_ascii(title);
+    lv_label_set_text(s_cardTitle, title);
+    lv_obj_set_style_text_color(s_cardTitle, lv_color_hex(AIRPORT_MARK_HEX), 0);
+
+    char elevS[20] = "-";
+    if (a.elevFt != -9999) fmt_alt(elevS, sizeof(elevS), (float)a.elevFt, false);
+    char left[96], right[96];
+    snprintf(left,  sizeof(left),  "TIME %s\nDIST %.1f %s\nELEV %s", timeS, dist_val(in.distKm), dist_unit(), elevS);
+    snprintf(right, sizeof(right), "BRG  %03.0f\nZONE %s\nCTRY %s", in.bearingDeg, zoneS, a.cc[0] ? a.cc : "-");
+    lv_label_set_text(s_cardL, left);
+    lv_label_set_text(s_cardR, right);
+
+    char nameS[64];
+    snprintf(nameS, sizeof(nameS), "%s", a.name[0] ? a.name : a.place);
+    fold_ascii(nameS);
+    lv_label_set_text(s_cardRoute, nameS);
+
+    s_lastRouteReq[0] = 0;                                  // nothing to look up for an airport
+    if (s_photo)       lv_obj_add_flag(s_photo, LV_OBJ_FLAG_HIDDEN);
+    if (s_photoCredit) lv_obj_add_flag(s_photoCredit, LV_OBJ_FLAG_HIDDEN);
+}
+#endif
+
 static void refresh_card(void) {
     AcInfo in;
     const bool sel = radar::selected(in);
-    if (s_clockUp || s_cardHold || !sel) {
+#if defined(KEEP_SELECTION_ON_BG_TAP)
+    // A dismissed card stays hidden only while that same aircraft stays selected. Selecting another
+    // aircraft, or none (the knob's "none" stop, or the aircraft leaving the feed), ends the dismissal.
+    if (!sel || (s_dismissedHex[0] && strcmp(s_dismissedHex, in.hex) != 0)) s_dismissedHex[0] = 0;
+#endif
+    if (s_clockUp || s_cardHold || s_dismissedHex[0] || !sel) {
         lv_obj_add_flag(s_card, LV_OBJ_FLAG_HIDDEN);
         if (s_photo)       lv_obj_add_flag(s_photo, LV_OBJ_FLAG_HIDDEN);
         if (s_photoCredit) lv_obj_add_flag(s_photoCredit, LV_OBJ_FLAG_HIDDEN);
@@ -190,6 +267,9 @@ static void refresh_card(void) {
         return;
     }
     lv_obj_clear_flag(s_card, LV_OBJ_FLAG_HIDDEN);
+#if defined(AIRPORT_SELECT)
+    if (in.kind == AC_KIND_AIRPORT) { airport_card(in); return; }   // an airport: its own content, no route or photo
+#endif
 
     char title[40];
     if (in.type[0]) snprintf(title, sizeof(title), "%s  %s", in.call[0] ? in.call : "-", in.type);
@@ -432,8 +512,28 @@ static void radar_clicked_cb(lv_event_t *e) {
     if (!indev) return;
     lv_point_t p;
     lv_indev_get_point(indev, &p);
+#if defined(KEEP_SELECTION_ON_BG_TAP)
+    // Was the card showing when the finger came down? Read it before card_hold_cancel() / refresh_card() change anything.
+    const bool cardWasVisible = !lv_obj_has_flag(s_card, LV_OBJ_FLAG_HIDDEN);
+#endif
     card_hold_cancel();                        // a tap is deliberate: show the card at once
+#if defined(KEEP_SELECTION_ON_BG_TAP)
+    // Tapping an aircraft selects it and shows its card (card_hold_cancel() above already cleared any
+    // dismissal, so tapping the selected aircraft again brings a hidden card back). Tapping the background
+    // while the card is showing hides the card but KEEPS the selection: the pulsing ring still marks the
+    // aircraft. Tapping the background when NO card is showing (it was dismissed, or the knob is still
+    // turning) clears the selection. The knob's "none" stop, or the aircraft leaving the feed, also clear it.
+    const int hit = radar::hitTest(p.x, p.y);
+    AcInfo cur;
+    if (hit >= 0) {
+        radar::select(hit);
+    } else if (radar::selected(cur)) {
+        if (cardWasVisible) snprintf(s_dismissedHex, sizeof(s_dismissedHex), "%s", cur.hex);
+        else                radar::select(-1);
+    }
+#else
     radar::select(radar::hitTest(p.x, p.y));   // hit -> select; miss -> clear
+#endif
     refresh_card();
 }
 
@@ -550,6 +650,21 @@ static bool s_rowStylesInit = false;
 // between press and release.
 static char s_listPressHex[sizeof(AcInfo::hex)];
 
+// The list's model: the aircraft (radar::info) first, then, on boards with airport selection, the airports inside
+// the scope (radar::airportInfo, nearest first). Row i of the list shows list_info(i).
+static int list_total(void) { return radar::count() + radar::airportCount(); }
+static bool list_info(int i, AcInfo &out) {
+    const int na = radar::count();
+    return i < na ? radar::info(i, out) : radar::airportInfo(i - na, out);
+}
+// Make row i the radar's selection: an aircraft by its index, an airport by its key.
+static void list_select_row(int i) {
+    const int na = radar::count();
+    if (i < na) { radar::select(i); return; }
+    AcInfo a;
+    if (radar::airportInfo(i - na, a)) radar::selectHex(a.hex);
+}
+
 static void list_press_cb(lv_event_t *e) {
     (void)e;
     s_listPressHex[0] = '\0';
@@ -563,8 +678,8 @@ static void list_press_cb(lv_event_t *e) {
     for (size_t i = 0; i < s_listRows.size(); ++i) {
         lv_obj_get_coords(s_listRows[i], &a);
         if (p.y >= a.y1 && p.y <= a.y2 + 2) {     // +2 swallows the 2 px row gap
-            AcInfo in;                              // row i shows radar::info(i) (build_list)
-            if (radar::info((int)i, in)) snprintf(s_listPressHex, sizeof(s_listPressHex), "%s", in.hex);
+            AcInfo in;                              // row i shows list_info(i) (build_list)
+            if (list_info((int)i, in)) snprintf(s_listPressHex, sizeof(s_listPressHex), "%s", in.hex);
             return;
         }
     }
@@ -651,9 +766,9 @@ static void list_scroll_end_cb(lv_event_t *e) {
     if (!s_tv || lv_tileview_get_tile_act(s_tv) != s_tileList || s_listRows.empty()) return;
     const int c = list_centre_row();
     AcInfo centre, cur;
-    radar::info(c, centre);
+    list_info(c, centre);
     if (radar::selected(cur) && strcmp(cur.hex, centre.hex) == 0) return;   // already the selected one
-    radar::select(c);
+    list_select_row(c);
     card_hold_for_list();
 }
 
@@ -703,6 +818,16 @@ static void icon_line(lv_draw_ctx_t *d, const lv_draw_line_dsc_t *ld, float cx, 
     lv_draw_line(d, ld, &a, &b);
 }
 
+#if defined(AIRPORT_SELECT)
+// A rectangle in the icons' design units (x right, y down, from the icon's centre), for the airport building.
+static void icon_rect(lv_draw_ctx_t *d, const lv_draw_rect_dsc_t *dsc, float cx, float cy,
+                      float x1, float y1, float x2, float y2) {
+    lv_area_t a = { (lv_coord_t)lroundf(cx + x1 * ICON_SCALE), (lv_coord_t)lroundf(cy + y1 * ICON_SCALE),
+                    (lv_coord_t)(lroundf(cx + x2 * ICON_SCALE) - 1), (lv_coord_t)(lroundf(cy + y2 * ICON_SCALE) - 1) };
+    lv_draw_rect(d, dsc, &a);
+}
+#endif
+
 static void list_icons_cb(lv_event_t *e) {
     lv_draw_ctx_t *d = lv_event_get_draw_ctx(e);
     const int n = (int)s_listRows.size();
@@ -716,7 +841,10 @@ static void list_icons_cb(lv_event_t *e) {
         lv_area_t ra;
         lv_obj_get_coords(s_listRows[i], &ra);
         if (ra.y2 < la.y1 || ra.y1 > la.y2) continue;
-        const lv_color_t col = s_listRowEmg[i] ? UI_EMERG : UI_INK;
+        lv_color_t col = s_listRowEmg[i] ? UI_EMERG : UI_INK;
+#if defined(AIRPORT_SELECT)
+        if (s_listRowKind[i] == AC_KIND_AIRPORT) col = lv_color_hex(AIRPORT_MARK_HEX);   // the same colour as its cross on the scope
+#endif
         // Fainter than the row's own text for every row but the outlined one: full strength in the middle,
         // down to AC_ICON_FAINT_PCT of the row's fade one row away. Smooth in between, so a scrolling wheel
         // brightens an icon as its row arrives instead of snapping.
@@ -752,6 +880,23 @@ static void list_icons_cb(lv_event_t *e) {
             ICON_POLY(kJetBody); ICON_POLY(kJetWingR); ICON_POLY(kJetWingL);
             ICON_POLY(kJetCanardR); ICON_POLY(kJetCanardL);
             break;
+#if defined(AIRPORT_SELECT)
+        case AC_KIND_AIRPORT: {                                 // a terminal building with its control tower
+            lv_draw_rect_dsc_t wd;                              // windows: the list panel's own colour, cut out of the building
+            lv_draw_rect_dsc_init(&wd);
+            wd.bg_color = lv_color_hex(0x05100A);
+            wd.bg_opa = opa;
+            wd.border_width = 0;
+            icon_rect(d, &pd, cx, cy, -8.0f, 0.0f, 3.0f, 7.0f);          // the terminal hall
+            icon_rect(d, &pd, cx, cy, 4.0f, -4.0f, 6.0f, 7.0f);          // the tower shaft
+            icon_rect(d, &pd, cx, cy, 2.5f, -8.0f, 7.5f, -4.0f);         // the tower cab, wider than the shaft
+            icon_rect(d, &wd, cx, cy, -6.5f, 2.0f, -5.0f, 3.5f);         // hall windows
+            icon_rect(d, &wd, cx, cy, -3.5f, 2.0f, -2.0f, 3.5f);
+            icon_rect(d, &wd, cx, cy, -0.5f, 2.0f, 1.0f, 3.5f);
+            icon_rect(d, &wd, cx, cy, 3.5f, -7.0f, 6.5f, -5.5f);         // the cab's window
+            break;
+        }
+#endif
         default:
             ICON_POLY(kPlaneBody); ICON_POLY(kPlaneWingR); ICON_POLY(kPlaneWingL);
             ICON_POLY(kPlaneTailR); ICON_POLY(kPlaneTailL);
@@ -775,13 +920,40 @@ bool ui_list_scroll(int steps) {
     if (to > n - 1) to = n - 1;
     if (to == from) return false;
     lv_obj_scroll_to_y(s_list, lv_obj_get_y(s_listRows[to]), LV_ANIM_ON);
-    radar::select(to);                                     // sync, list to radar: the focused row IS the selected aircraft
+    list_select_row(to);                                   // sync, list to radar: the focused row IS the selected aircraft (or airport)
     card_hold_for_list();                                  // selected NOW (not at scroll end) so a poll mid-scroll cannot pull the list back
     return true;
 }
 #else
 bool ui_list_active(void) { return false; }
 bool ui_list_scroll(int) { return false; }
+#endif
+
+#if defined(AIRPORT_SELECT) && defined(LIST_WHEEL)
+// An airport's two lines in the list:
+//   Edinburgh
+//   EDI   LOCAL 14:32
+// Line 1 is the airport's name (the city when it has none), cut to what fits on one line: a longer line would
+// wrap and push line 2 out of the row.
+static void airport_row_text(const AcInfo &in, char *txt, size_t n) {
+    APInfo a;
+    if (!airports_info_by_index(atoi(in.hex + 1), &a)) { snprintf(txt, n, "%s", in.call); return; }
+    char name[48], code[8], timeS[8] = "--:--";
+    plain_text(name, sizeof(name), a.name[0] ? a.name : a.place);
+    fold_ascii(name);
+    if (strlen(name) > 28) {                                       // too long for the row: cut it and say so with ".."
+        int k = 26;
+        while (k > 0 && name[k - 1] == ' ') --k;
+        name[k] = '.';
+        name[k + 1] = '.';
+        name[k + 2] = 0;
+    }
+    plain_text(code, sizeof(code), a.iata[0] ? a.iata : a.icao);
+    int hh = 0, mm = 0, off = 0;
+    const time_t now = time(nullptr);
+    if (now > 1700000000 && airports_local_time(a, (int64_t)now, &hh, &mm, &off)) snprintf(timeS, sizeof(timeS), "%02d:%02d", hh, mm);
+    snprintf(txt, n, "#EAFFF3 %s#\n%s   LOCAL %s", name, code, timeS);
+}
 #endif
 
 static void build_list(void) {
@@ -809,7 +981,7 @@ static void build_list(void) {
         lv_style_set_text_color(&s_rowEmgStyle, UI_EMERG);
         s_rowStylesInit = true;
     }
-    const int n = radar::count();
+    const int n = list_total();                                   // the aircraft, then the airports inside the scope
 #if defined(LIST_WHEEL)
     AcInfo selInfo;
     const bool haveSel = radar::selected(selInfo);                // the aircraft selected on the radar (or by this list)
@@ -817,7 +989,7 @@ static void build_list(void) {
 #endif
     for (int i = 0; i < n; ++i) {
         AcInfo in;
-        radar::info(i, in);
+        list_info(i, in);
 #if defined(LIST_WHEEL)
         if (haveSel && strcmp(in.hex, selInfo.hex) == 0) selIdx = i;
 #endif
@@ -838,6 +1010,10 @@ static void build_list(void) {
         plain_text(ty, sizeof(ty), in.type);
         if (ty[0]) snprintf(head, sizeof(head), "%s   %s   DIST %.1f%s", c1, ty, dist_val(in.distKm), dist_unit());
         else       snprintf(head, sizeof(head), "%s   DIST %.1f%s", c1, dist_val(in.distKm), dist_unit());
+#if defined(AIRPORT_SELECT)
+        if (in.kind == AC_KIND_AIRPORT) airport_row_text(in, txt, sizeof(txt));
+        else
+#endif
         snprintf(txt, sizeof(txt), "%s%s%s\nALT %s  SPD %s",
                  in.emergency ? "" : "#EAFFF3 ", head, in.emergency ? "" : "#", altS, spdS);
 #else
@@ -924,6 +1100,68 @@ static void build_stats(void) {
     lv_label_set_text(s_statsLbl, st);
 }
 
+#if WX_VIEW_D != WX_RADAR_SIZE
+// The weather picture, scaled ONCE from WX_RADAR_SIZE down to WX_VIEW_D (see the canvas comment in
+// ui_create). It lives in PSRAM (about 150 KB) and is rebuilt only when a new picture arrives or the
+// mode changes, so showing it, and every frame of a swipe, is a plain copy.
+static uint16_t       *s_wxScaled = nullptr;
+static const uint16_t *s_wxScaledFrom = nullptr;       // the source buffer, version and mode that s_wxScaled holds
+static uint32_t        s_wxScaledVer = 0;
+static int             s_wxScaledMode = -1;
+
+static uint16_t *wx_alloc_scaled(void) {
+    const size_t bytes = (size_t)WX_VIEW_D * WX_VIEW_D * sizeof(uint16_t);
+#if defined(ESP_PLATFORM)
+    return (uint16_t *)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+#else
+    return (uint16_t *)malloc(bytes);
+#endif
+}
+
+// Bilinear downscale of an RGB565 picture (LV_COLOR_16_SWAP is 0, so the pixels are plain RGB565).
+// Weights are in 1/256ths; per channel the horizontal blend on both rows, then the vertical one.
+static void wx_prescale(const uint16_t *src, uint16_t *dst) {
+    const int S = WX_RADAR_SIZE, D = WX_VIEW_D;
+    static int cx0[WX_VIEW_D], cx1[WX_VIEW_D], cxw[WX_VIEW_D];      // per output column: two source columns and the second one's weight
+    for (int x = 0; x < D; ++x) {
+        const float fx = ((float)x + 0.5f) * (float)S / (float)D - 0.5f;
+        int i0 = (int)floorf(fx);
+        int w = (int)lroundf((fx - (float)i0) * 256.0f);
+        int i1 = i0 + 1;
+        if (i0 < 0) i0 = 0;
+        if (i0 > S - 1) i0 = S - 1;
+        if (i1 > S - 1) i1 = S - 1;
+        if (w < 0) w = 0;
+        if (w > 256) w = 256;
+        cx0[x] = i0; cx1[x] = i1; cxw[x] = w;
+    }
+    for (int y = 0; y < D; ++y) {
+        const float fy = ((float)y + 0.5f) * (float)S / (float)D - 0.5f;
+        int j0 = (int)floorf(fy);
+        int wy = (int)lroundf((fy - (float)j0) * 256.0f);
+        int j1 = j0 + 1;
+        if (j0 < 0) j0 = 0;
+        if (j0 > S - 1) j0 = S - 1;
+        if (j1 > S - 1) j1 = S - 1;
+        if (wy < 0) wy = 0;
+        if (wy > 256) wy = 256;
+        const uint16_t *r0 = src + (size_t)j0 * S;
+        const uint16_t *r1 = src + (size_t)j1 * S;
+        uint16_t *o = dst + (size_t)y * D;
+        for (int x = 0; x < D; ++x) {
+            const uint16_t a = r0[cx0[x]], b = r0[cx1[x]], c = r1[cx0[x]], d = r1[cx1[x]];
+            const int wx = cxw[x];
+            auto ch = [&](int sh, int mask) -> int {
+                const int top = ((a >> sh) & mask) * (256 - wx) + ((b >> sh) & mask) * wx;
+                const int bot = ((c >> sh) & mask) * (256 - wx) + ((d >> sh) & mask) * wx;
+                return (top * (256 - wy) + bot * wy) >> 16;
+            };
+            o[x] = (uint16_t)((ch(11, 31) << 11) | (ch(5, 63) << 5) | ch(0, 31));
+        }
+    }
+}
+#endif
+
 static void build_weather(void) {
     if (!s_weatherNow || !s_weatherMeta || !s_weatherDays || !s_wxFooter) return;
     WeatherSnapshot w;
@@ -1007,8 +1245,26 @@ static void build_weather(void) {
     else
         haveImage = wx_radar_front(&radarPixels, &frameTime, &rlat, &rlon, &version);
     const uint16_t *pixels = cloudMode ? cloudPixels : radarPixels;
-    if (haveImage && pixels && s_wxCanvas) {
-        lv_canvas_set_buffer(s_wxCanvas, (void *)pixels, WX_RADAR_SIZE, WX_RADAR_SIZE, LV_IMG_CF_TRUE_COLOR);
+    const uint16_t *shown = pixels;                        // what the canvas will display
+    int shownSize = WX_RADAR_SIZE;
+#if WX_VIEW_D != WX_RADAR_SIZE
+    if (haveImage && pixels) {
+        if (!s_wxScaled) s_wxScaled = wx_alloc_scaled();
+        if (s_wxScaled) {
+            const int mode = cloudMode ? 1 : 0;
+            if (s_wxScaledFrom != pixels || s_wxScaledVer != version || s_wxScaledMode != mode) {
+                wx_prescale(pixels, s_wxScaled);           // once per new picture; every later frame is a plain copy
+                s_wxScaledFrom = pixels; s_wxScaledVer = version; s_wxScaledMode = mode;
+            }
+            shown = s_wxScaled;
+            shownSize = WX_VIEW_D;
+        } else {
+            shown = nullptr;                               // no memory for the scaled copy: no picture, not a wrongly sized one
+        }
+    }
+#endif
+    if (haveImage && shown && s_wxCanvas) {
+        lv_canvas_set_buffer(s_wxCanvas, (void *)shown, shownSize, shownSize, LV_IMG_CF_TRUE_COLOR);
         lv_obj_clear_flag(s_wxCanvas, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_wxStatus, LV_OBJ_FLAG_HIDDEN);
         lv_obj_invalidate(s_wxCanvas);
@@ -1125,6 +1381,10 @@ void ui_set_weather_forecast(bool forecast) {
 // Rebuild whichever of list/stats is currently on screen (called on poll and on swipe).
 static void (*s_viewChangedCb)(int) = nullptr;
 void ui_set_view_changed_cb(void (*cb)(int idx)) { s_viewChangedCb = cb; }
+// Fired when a swipe between pages starts (begin = true) and when it has come to rest (begin = false,
+// view = the page it ended on). Used only for the frame-time diagnostic.
+static void (*s_swipeCb)(bool, int) = nullptr;
+void ui_set_swipe_cb(void (*cb)(bool begin, int view)) { s_swipeCb = cb; }
 // The knob changed the radar selection (fork-only). Hide the card now and (re)start the debounce:
 // every further click restarts the KNOB_CARD_DELAY_MS wait, and the card shows only once the ring
 // has been still for that long. The selected plane stays highlighted on the scope meanwhile.
@@ -1245,16 +1505,14 @@ static lv_obj_t *make_tile_title(lv_obj_t *tile, const char *txt) {
 #ifndef WEATHER_PANEL_D
 #define WEATHER_PANEL_D 462
 #endif
-
-// The weather radar / cloud picture is WX_RADAR_SIZE px across, shown 1:1 (it is a crop of a larger
-// source image, so a smaller canvas would show LESS area, not the same area smaller). On a round glass of
-// about that size it fills the whole screen edge to edge and looks zoomed in, where the 466 px boards
-// leave ~53 px of margin around it. WX_VIEW_D is the diameter it is DRAWN at: the picture is scaled
-// about its centre, and its rings and labels with it, so it shows the same area, just smaller.
-// Default: unscaled.
-#ifndef WX_VIEW_D
-#define WX_VIEW_D WX_RADAR_SIZE
+// A plain (square, unclipped, rimless) weather panel. The circular clip makes LVGL mask every pixel of the
+// page on every frame, which made swiping to it laggy; on a round glass the corners and the rim of a
+// 462 px panel are off-screen anyway. Default off: the bigger boards keep their circle.
+#ifndef WEATHER_PANEL_PLAIN
+#define WEATHER_PANEL_PLAIN false
 #endif
+
+// WX_VIEW_D (the size the weather picture is shown at) has its default near the top of this file.
 
 // Where the "N" marker sits (panel-relative y). Default: just inside the top of the drawn circle. A board
 // that puts a location line there (WEATHER_LOC_Y) moves it down clear of that line.
@@ -1294,20 +1552,27 @@ static lv_obj_t *make_tile_title(lv_obj_t *tile, const char *txt) {
 #ifndef STATS_VER_Y
 #define STATS_VER_Y 170
 #endif
+#ifndef STATS_WIFI_Y            // where the WiFi bars sit on the Stats page (WIFI_BARS_ON_STATS): just above the network line
+#define STATS_WIFI_Y (STATS_NET_Y - 22)
+#endif
 
 // A full-screen round panel that clips its content to the circle (for list/stats views).
-static lv_obj_t *make_round_panel(lv_obj_t *parent, int d = ROUND_PANEL_D) {
+static lv_obj_t *make_round_panel(lv_obj_t *parent, int d = ROUND_PANEL_D, bool plain = false) {
     lv_obj_t *p = lv_obj_create(parent);
     lv_obj_remove_style_all(p);
     lv_obj_set_size(p, d, d);
     lv_obj_center(p);
-    lv_obj_set_style_radius(p, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(p, lv_color_hex(0x05100A), 0);
     lv_obj_set_style_bg_opa(p, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(p, UI_GREEN, 0);
-    lv_obj_set_style_border_opa(p, 50, 0);
-    lv_obj_set_style_border_width(p, 2, 0);
-    lv_obj_set_style_clip_corner(p, true, 0);
+    if (!plain) {
+        // The circular shape, its rim and the corner clip are what make LVGL push every pixel drawn on the
+        // panel through a mask, on every frame. A "plain" panel (see WEATHER_PANEL_PLAIN) skips all three.
+        lv_obj_set_style_radius(p, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_color(p, UI_GREEN, 0);
+        lv_obj_set_style_border_opa(p, 50, 0);
+        lv_obj_set_style_border_width(p, 2, 0);
+        lv_obj_set_style_clip_corner(p, true, 0);
+    }
     lv_obj_clear_flag(p, LV_OBJ_FLAG_SCROLLABLE);
     return p;
 }
@@ -1436,6 +1701,138 @@ void ui_splash_show(void) {
     lv_timer_set_repeat_count(t, 1);
 }
 
+// What happens when a different page becomes the active one. It runs from the tileview's tile-changed
+// event, which LVGL sends for a finger drag AND, as the timing log showed, when the page slide switches
+// tiles from code (lv_obj_set_tile_id): the slide therefore only calls it itself if that event did not.
+// (It used to call it unconditionally, so every slide built the page twice.)
+static uint32_t s_arriveBuildMs = 0, s_arriveCardMs = 0;   // last arrival: page build time, aircraft-card refresh time (diagnostic)
+static uint32_t s_arrivals = 0;                            // how many times a page has arrived (lets the slide see if LVGL's own event already ran one)
+static void page_arrived(void) {
+    ++s_arrivals;
+    const uint32_t tA = lv_tick_get();
+    refresh_active_tile();
+    const uint32_t tB = lv_tick_get();
+#if defined(LIST_WHEEL)
+    // Back on the radar after choosing an aircraft in the list: release the hold the list set, so the
+    // card (with its route and photo lookups) appears now, for the aircraft that was selected there.
+    if (s_listHold && lv_tileview_get_tile_act(s_tv) == s_tileRadar) {
+        card_hold_cancel();
+        refresh_card();
+    }
+#endif
+    s_arriveBuildMs = tB - tA;
+    s_arriveCardMs = lv_tick_get() - tB;
+    if (s_viewChangedCb) s_viewChangedCb(active_view_index());   // let main remember the last view
+}
+
+#if defined(SWIPE_SLIDE)
+#ifndef SWIPE_SLIDE_MS
+#define SWIPE_SLIDE_MS 280
+#endif
+static int  s_pendingDir = 0;      // the swipe-start handler asked for a slide that has not run yet (+1 next, -1 previous)
+static bool s_slideBusy  = false;  // a slide is being prepared or run
+#endif
+static inline bool slide_busy(void) {
+#if defined(SWIPE_SLIDE)
+    return s_slideBusy;
+#else
+    return false;
+#endif
+}
+
+#if defined(SWIPE_SLIDE)
+// Page slide (fork-only). LVGL announces a horizontal scroll of the tileview; instead of letting it redraw
+// the whole screen on every frame of the drag, take over: work out which way the swipe goes, CANCEL LVGL's
+// finger tracking, and queue a slide for ui_service() to run from the main loop (never from inside this
+// input callback). LVGL itself works out the swipe direction BEFORE announcing it and skips its scroll step
+// if the input is reset here, so nothing moves with the finger.
+static void tv_scroll_begin_cb(lv_event_t *e) {
+    (void)e;
+    lv_indev_t *ind = lv_indev_get_act();                  // NULL when LVGL scrolls the tileview from code
+    if (!ind || s_pendingDir != 0 || s_slideBusy) return;
+    if (lv_indev_get_scroll_dir(ind) != LV_DIR_HOR) return;
+    if (!display::transitionReady()) return;               // rotated, or no PSRAM copy: LVGL's own drag stays in charge
+    const int cur = active_view_index();
+    // Which neighbours this page may scroll to: finger left = next page (LV_DIR_RIGHT), finger right = previous.
+    const lv_dir_t allowed = lv_obj_get_scroll_dir(s_tv);
+    const bool canNext = (allowed & LV_DIR_RIGHT) && cur < 3;
+    const bool canPrev = (allowed & LV_DIR_LEFT) && cur > 0;
+    int dir = 0;
+    if (canNext && canPrev) {                              // list and stats: the finger's direction decides
+        lv_point_t v;
+        lv_indev_get_vect(ind, &v);
+        dir = v.x < 0 ? +1 : -1;
+    } else if (canNext) {
+        dir = +1;
+    } else if (canPrev) {
+        dir = -1;
+    }
+    if (dir == 0) return;
+    s_pendingDir = dir;
+    lv_indev_wait_release(ind);        // swallow the rest of this gesture; lifting the finger then sends no click
+    lv_indev_reset(ind, NULL);         // and skip this scroll step, so nothing moves with the finger
+}
+
+// Bring the next page up on LVGL's screen, render it ONCE in full into an offscreen picture (the panel keeps
+// showing the page being left), then slide from one picture to the other with no LVGL work per frame.
+static void run_page_slide(int dir) {
+    const int cur = active_view_index();
+    const int next = cur + dir;
+    if (next < 0 || next > 3) return;
+    s_slideBusy = true;
+    if (display::captureBegin()) {
+        const uint32_t t0 = lv_tick_get();
+        const uint32_t arrivalsBefore = s_arrivals;
+        lv_obj_set_tile_id(s_tv, (uint32_t)next, 0, LV_ANIM_OFF);   // LVGL's tile-changed event normally builds the page here
+        const uint32_t t1 = lv_tick_get();
+        if (s_arrivals == arrivalsBefore) page_arrived();  // ...but if it did not, build it now (never twice)
+        const uint32_t t2 = lv_tick_get();
+        lv_obj_invalidate(lv_scr_act());                   // the whole screen, so the picture is complete
+        lv_refr_now(NULL);                                 // render it now; flush_cb diverts it into the picture
+        const uint32_t t3 = lv_tick_get();
+        display::captureEnd();
+        display::slideReport(cur, next, t2 - t0, s_arriveBuildMs, s_arriveCardMs, t3 - t2);   // switch tile (includes the build), then render
+        (void)t1;
+        display::slide(dir, SWIPE_SLIDE_MS);
+    } else {
+        const uint32_t arrivalsBefore = s_arrivals;
+        lv_obj_set_tile_id(s_tv, (uint32_t)next, 0, LV_ANIM_OFF);   // no memory for a second picture: plain switch
+        if (s_arrivals == arrivalsBefore) page_arrived();
+    }
+    s_slideBusy = false;
+}
+#endif
+
+// Run a page slide that the swipe-start handler queued. Called from the main loop after display::loop().
+void ui_service(void) {
+#if defined(SWIPE_SLIDE)
+    if (s_pendingDir == 0) return;
+    const int dir = s_pendingDir;
+    s_pendingDir = 0;
+    run_page_slide(dir);
+#endif
+}
+
+// The 4-bar WiFi signal meter (bar count = RSSI strength, colour = feed health; see ui_set_status). Sets
+// s_hudWifi and s_hudBars. The parent decides where it lives: the radar's top row, or the Stats page.
+static void make_wifi_bars(lv_obj_t *parent, lv_align_t align, lv_coord_t x, lv_coord_t y) {
+    s_hudWifi = lv_obj_create(parent);
+    lv_obj_remove_style_all(s_hudWifi);
+    lv_obj_set_size(s_hudWifi, 21, 14);
+    lv_obj_align(s_hudWifi, align, x, y);
+    lv_obj_clear_flag(s_hudWifi, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    for (int i = 0; i < 4; ++i) {
+        s_hudBars[i] = lv_obj_create(s_hudWifi);
+        lv_obj_remove_style_all(s_hudBars[i]);
+        lv_obj_set_size(s_hudBars[i], 3, (lv_coord_t)(4 + i * 3));   // 4, 7, 10, 13 px tall
+        lv_obj_align(s_hudBars[i], LV_ALIGN_BOTTOM_LEFT, (lv_coord_t)(i * 5), 0);
+        lv_obj_set_style_radius(s_hudBars[i], 1, 0);
+        lv_obj_set_style_bg_color(s_hudBars[i], UI_INK, 0);
+        lv_obj_set_style_bg_opa(s_hudBars[i], LV_OPA_COVER, 0);
+        lv_obj_clear_flag(s_hudBars[i], LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    }
+}
+
 void ui_create(void) {
     lv_obj_t *scr = lv_scr_act();
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
@@ -1457,18 +1854,16 @@ void ui_create(void) {
     lv_obj_clear_flag(s_tileWeather, LV_OBJ_FLAG_SCROLLABLE);
     // Rebuild the list/stats with the latest data the moment they slide into view
     // (between polls they'd otherwise show whatever was there when last visible).
-    lv_obj_add_event_cb(s_tv, [](lv_event_t *) {
-        refresh_active_tile();
-#if defined(LIST_WHEEL)
-        // Back on the radar after choosing an aircraft in the list: release the hold the list set, so the
-        // card (with its route and photo lookups) appears now, for the aircraft that was selected there.
-        if (s_listHold && lv_tileview_get_tile_act(s_tv) == s_tileRadar) {
-            card_hold_cancel();
-            refresh_card();
-        }
+    lv_obj_add_event_cb(s_tv, [](lv_event_t *) { page_arrived(); }, LV_EVENT_VALUE_CHANGED, nullptr);
+    // Frame-time diagnostic: tell main when a swipe between pages starts and when it has settled. Ignored while
+    // a page slide is switching tiles from code (those scroll events are not a finger swipe).
+    lv_obj_add_event_cb(s_tv, [](lv_event_t *) { if (s_swipeCb && !slide_busy()) s_swipeCb(true, active_view_index()); },
+                        LV_EVENT_SCROLL_BEGIN, nullptr);
+    lv_obj_add_event_cb(s_tv, [](lv_event_t *) { if (s_swipeCb && !slide_busy()) s_swipeCb(false, active_view_index()); },
+                        LV_EVENT_SCROLL_END, nullptr);
+#if defined(SWIPE_SLIDE)
+    lv_obj_add_event_cb(s_tv, tv_scroll_begin_cb, LV_EVENT_SCROLL_BEGIN, nullptr);   // page slide takes over the swipe
 #endif
-        if (s_viewChangedCb) s_viewChangedCb(active_view_index());   // let main remember the last view
-    }, LV_EVENT_VALUE_CHANGED, nullptr);
 
     // --- radar tile ---
     lv_obj_clear_flag(s_tileRadar, LV_OBJ_FLAG_SCROLLABLE);
@@ -1502,23 +1897,11 @@ void ui_create(void) {
     lv_obj_set_style_text_color(s_zoomLbl, UI_GREEN, 0);
     lv_obj_center(s_zoomLbl);
 
-    // top status HUD (wifi / aircraft count / clock); white reads on both themes.
+    // top status HUD (aircraft count / clock / ...); white reads on both themes.
+#if !defined(WIFI_BARS_ON_STATS)
     // WiFi is a 4-bar signal meter: bar count = RSSI strength, colour = feed health.
-    s_hudWifi = lv_obj_create(s_tileRadar);
-    lv_obj_remove_style_all(s_hudWifi);
-    lv_obj_set_size(s_hudWifi, 21, 14);
-    lv_obj_align(s_hudWifi, LV_ALIGN_TOP_MID, -94, 50);
-    lv_obj_clear_flag(s_hudWifi, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    for (int i = 0; i < 4; ++i) {
-        s_hudBars[i] = lv_obj_create(s_hudWifi);
-        lv_obj_remove_style_all(s_hudBars[i]);
-        lv_obj_set_size(s_hudBars[i], 3, (lv_coord_t)(4 + i * 3));   // 4, 7, 10, 13 px tall
-        lv_obj_align(s_hudBars[i], LV_ALIGN_BOTTOM_LEFT, (lv_coord_t)(i * 5), 0);
-        lv_obj_set_style_radius(s_hudBars[i], 1, 0);
-        lv_obj_set_style_bg_color(s_hudBars[i], UI_INK, 0);
-        lv_obj_set_style_bg_opa(s_hudBars[i], LV_OPA_COVER, 0);
-        lv_obj_clear_flag(s_hudBars[i], LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    }
+    make_wifi_bars(s_tileRadar, LV_ALIGN_TOP_MID, -94, 50);
+#endif
 
     s_hudGps = lv_label_create(s_tileRadar);     // GPS satellite icon (between WiFi bars and count)
     lv_obj_set_style_text_font(s_hudGps, F14(), 0);
@@ -1624,6 +2007,23 @@ void ui_create(void) {
     lv_obj_set_style_text_align(s_statsNet, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_statsNet, "");
     lv_obj_align(s_statsNet, LV_ALIGN_CENTER, 0, STATS_NET_Y);
+#if defined(WIFI_BARS_ON_STATS)
+    {   // The WiFi signal meter lives here on this board (not in the radar's top row), with a label on one line:
+        //     Wifi strength  [bars]
+        // above the network text. The label is measured, so the pair is centred whatever the font's widths.
+        static const char *kWifiLabel = "Wifi strength";
+        lv_point_t ls;
+        lv_txt_get_size(&ls, kWifiLabel, F14(), 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        const int gap = 8, barsW = 21;                                   // barsW: make_wifi_bars' container width
+        const int total = ls.x + gap + barsW;
+        make_wifi_bars(sp, LV_ALIGN_CENTER, (lv_coord_t)(-total / 2 + ls.x + gap + barsW / 2), STATS_WIFI_Y);
+        lv_obj_t *wl = lv_label_create(sp);
+        lv_obj_set_style_text_font(wl, F14(), 0);
+        lv_obj_set_style_text_color(wl, UI_SOFT, 0);
+        lv_label_set_text(wl, kWifiLabel);
+        lv_obj_align(wl, LV_ALIGN_CENTER, (lv_coord_t)(-total / 2 + ls.x / 2), STATS_WIFI_Y);
+    }
+#endif
 
     // power off (hold) -- top of the Stats view, under the title
     s_offBtn = lv_btn_create(sp);
@@ -1668,7 +2068,7 @@ void ui_create(void) {
     lv_obj_align(ver, LV_ALIGN_CENTER, 0, STATS_VER_Y);
 
     // --- weather tile (current conditions + next three days) ---
-    lv_obj_t *wp = make_round_panel(s_tileWeather, WEATHER_PANEL_D);   // its layout is positioned from this panel's top edge
+    lv_obj_t *wp = make_round_panel(s_tileWeather, WEATHER_PANEL_D, WEATHER_PANEL_PLAIN);   // its layout is positioned from this panel's top edge
     // The entire view cycles the weather mode: there is nothing else to touch here, and a
     // 34px pill 18px from the bottom of a ROUND panel is a genuinely hard target -- measured
     // presses aimed at it landed a few px low, outside it, and read as the button ignoring
@@ -1751,19 +2151,13 @@ void ui_create(void) {
 
     s_wxCanvas = lv_canvas_create(wp);
 #if WX_VIEW_D != WX_RADAR_SIZE
-    // Draw the picture smaller, about its centre, so it has a margin on a round glass (see WX_VIEW_D).
-    // 256 = 100%. The decoded picture and its buffer are untouched; only how it is drawn changes.
-    //
-    // The widget must be exactly the size the picture is DRAWN at, in "real size" mode. LVGL's image
-    // widget TILES its picture across the whole widget: with the widget left at WX_RADAR_SIZE and the
-    // picture drawn smaller, a second copy started at WX_VIEW_D px and its edges showed as bright
-    // strips down the right and across the bottom. In real-size mode the scaled picture sits at the
-    // widget's top-left and the widget is the same size, so there is a single copy.
-    lv_img_set_size_mode(s_wxCanvas, LV_IMG_SIZE_MODE_REAL);
+    // The picture is shown smaller than it is decoded, so it has a margin on a round glass (see
+    // WX_VIEW_D). It is scaled ONCE, into its own WX_VIEW_D buffer, when a new picture arrives (see
+    // wx_prescale() in build_weather): the canvas then holds a picture of exactly its own size and every
+    // frame is a plain copy. (This used to be LVGL's image zoom, a per-pixel transform redone on every
+    // frame of a swipe, which made swiping to this page laggy.)
     lv_obj_set_size(s_wxCanvas, WX_VIEW_D, WX_VIEW_D);
     lv_obj_align(s_wxCanvas, LV_ALIGN_TOP_MID, 0, 52 + (WX_RADAR_SIZE - WX_VIEW_D) / 2);   // centred where the 360 px one was
-    lv_img_set_pivot(s_wxCanvas, WX_RADAR_SIZE / 2, WX_RADAR_SIZE / 2);
-    lv_img_set_zoom(s_wxCanvas, (256 * WX_VIEW_D) / WX_RADAR_SIZE);
 #else
     lv_obj_set_size(s_wxCanvas, WX_RADAR_SIZE, WX_RADAR_SIZE);
     lv_obj_align(s_wxCanvas, LV_ALIGN_TOP_MID, 0, 52);

@@ -31,6 +31,25 @@ void noteActivity();
 // Not available on the LCD 2.1 backend; only the knob build calls it.
 void logLvglMem(const char *tag);
 
+// Frame-time diagnostic: perfReset() clears LVGL's per-frame render-time counters, perfLog() prints
+// frames, average and worst render time and pixels drawn since. Called around a swipe between pages.
+// Not available on the LCD 2.1 backend; only the knob build calls them.
+void perfReset();
+void perfLog(const char *tag);
+
+// Page slide (fork-only; not available on the LCD 2.1 backend). transitionReady() says whether it can run
+// now (the compositor's PSRAM copy of the panel exists and the display is at rotation 0). Then:
+//   captureBegin(); ...make LVGL render the whole next page (lv_refr_now)...; captureEnd();
+//   slide(dir, ms);
+// captureBegin() diverts everything LVGL flushes into an offscreen picture and leaves the panel alone;
+// slide() then moves from the panel's current picture to the captured one, over `ms`, with no LVGL work.
+// dir > 0 enters the next page from the right, dir < 0 the previous one from the left.
+bool transitionReady();
+bool captureBegin();
+void captureEnd();
+void slideReport(int from, int to, uint32_t tileMs, uint32_t buildMs, uint32_t cardMs, uint32_t renderMs);   // diagnostic line per swipe
+void slide(int dir, uint32_t ms);
+
 // Rotate the whole UI clockwise by an arbitrary number of degrees (normalized to
 // 0..359), e.g. to compensate for any enclosure/mounting angle. Cardinal rotations
 // keep their optimized flush paths; other angles use a PSRAM framebuffer. Touch input

@@ -23,7 +23,8 @@ enum RadarTheme {
 };
 
 // What an aircraft is drawn as in the aircraft list (fork-only): see aircraft_kind() in radar_view.cpp.
-enum { AC_KIND_PLANE = 0, AC_KIND_HELI = 1, AC_KIND_MIL = 2 };
+// AC_KIND_AIRPORT marks an airport row (boards that define AIRPORT_SELECT): the list draws a building.
+enum { AC_KIND_PLANE = 0, AC_KIND_HELI = 1, AC_KIND_MIL = 2, AC_KIND_AIRPORT = 3 };
 
 // Flattened, display-ready info for one aircraft (detail card / list view).
 struct AcInfo {
@@ -69,6 +70,12 @@ bool cycleSelection(int steps);
 int  count();
 int  countInRange();                        // aircraft within the display range (for the HUD)
 bool info(int idx, AcInfo& out);
+
+// The airports inside the scope, as things the user can select like aircraft (boards that define
+// AIRPORT_SELECT and have airport markers switched on; otherwise zero / false). An airport's AcInfo has kind
+// AC_KIND_AIRPORT, its IATA code in `call`, and a `hex` of the form "@<table index>": the selection key.
+int  airportCount();
+bool airportInfo(int k, AcInfo& out);       // the k-th of them, nearest first
 
 // Sweep self-animates via an internal timer; kept for API compatibility.
 void tickSweep();

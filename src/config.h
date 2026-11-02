@@ -23,7 +23,14 @@
 // web-only 250 km) promised rings the feed never fills. A stored range outside
 // [RANGE_KM_MIN, RANGE_KM_MAX] is clamped at boot and on save; <= 0, NaN or inf becomes
 // RANGE_KM_DEFAULT (0 divides by zero in geo::projectToScreen).
+#if defined(BOARD_KNOB18)
+// Fork-only: the knob's zoom button steps on to 150 km. The web page already offered it and RANGE_KM_MAX
+// allows it; the feed query is capped at exactly 150 km, so the outer ring is just covered (no margin
+// beyond it for edge arrows at this range).
+static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f, 150.0f};
+#else
 static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
+#endif
 static const float WEB_RANGE_KM[]   = {10.0f, 15.0f, 25.0f, 30.0f, 50.0f, 100.0f, 150.0f};
 #define RANGE_KM_MIN        10.0f
 #define RANGE_KM_MAX        150.0f

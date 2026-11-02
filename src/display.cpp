@@ -44,6 +44,28 @@ static void panel_set_brightness(uint8_t v) { if (s_gfx) s_gfx->setBrightness(v)
 #define LVGL_BUF_LINES 40    // partial draw-buffer height (lines); kept in fast internal RAM
 static lv_disp_draw_buf_t s_draw_buf;
 static lv_disp_drv_t      s_disp_drv;
+
+// Frame-time diagnostic. LVGL calls the monitor callback after every refresh with how long it took
+// (render + flush) and how many pixels it drew; these accumulate between perfReset() and perfLog().
+static uint32_t s_pfFrames = 0, s_pfSumMs = 0, s_pfMaxMs = 0;
+static uint64_t s_pfSumPx = 0;
+// Where a frame's time goes (microseconds, summed over the frame's strips): the transfer to the panel,
+// the sweep compositor tick and the touch read that flush_cb also does. LVGL's drawing is the rest.
+static uint64_t s_pfFlushUs = 0, s_pfComposeUs = 0, s_pfTouchUs = 0;
+static uint32_t s_pfStrips = 0;
+static void perf_monitor_cb(lv_disp_drv_t *, uint32_t ms, uint32_t px) {
+    s_pfFrames++;
+    s_pfSumMs += ms;
+    if (ms > s_pfMaxMs) s_pfMaxMs = ms;
+    s_pfSumPx += px;
+}
+// Page transition state (fork-only; see slide() near the end of this file). While the next page is being
+// rendered offscreen, flush_cb copies it into s_cap instead of pushing it to the panel; while the slide
+// itself runs, the sweep compositor is paused.
+static uint16_t *s_cap        = nullptr;   // the next page, rendered offscreen (PSRAM, SCREEN_W x SCREEN_H)
+static bool      s_capturing  = false;
+static bool      s_transition = false;
+static uint32_t  s_capStartMs = 0;
 static lv_indev_drv_t     s_indev_drv;
 static lv_color_t        *s_buf1 = nullptr;
 static lv_color_t        *s_buf2 = nullptr;
@@ -478,6 +500,7 @@ static bool sweep_ready() { return s_phys && s_angMap && s_compBuf; }
 
 static void compose_step() {
     if (!sweep_ready()) return;
+    if (s_transition || s_capturing) return;      // a page slide owns the panel: no overlays until it is done
     const bool sweepOn = s_swWanted && s_swVisible;
     const bool pulseOn = s_pulseWanted && s_swVisible;
     const uint32_t now = millis();
@@ -642,12 +665,28 @@ static void flush_arbitrary(const lv_area_t *area) {
 static void compose_step();
 static void touch_sample(bool force);
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
+    // Rendering the NEXT page offscreen for a slide (see slide()): keep it out of the panel and out of the
+    // compositor's mirror; the panel keeps showing the page being left until the slide starts.
+    if (s_capturing && s_cap) {
+        const int cw = (int)(area->x2 - area->x1 + 1);
+        const int ch = (int)(area->y2 - area->y1 + 1);
+        for (int row = 0; row < ch; ++row)
+            memcpy(s_cap + (size_t)(area->y1 + row) * SCREEN_W + area->x1, (const uint16_t *)px + (size_t)row * cw,
+                   (size_t)cw * 2);
+        lv_disp_flush_ready(drv);
+        return;
+    }
     // Let the sweep tick between strips of a long LVGL frame (a full repaint takes ~200 ms).
     // Safe mid-frame: strips already flushed are in s_phys and on the panel; the rest of
     // s_phys still matches what the panel shows, so the composite is never wrong.
+    const uint32_t pfT0 = micros();
     compose_step();
+    const uint32_t pfT1 = micros();
     // Sample the touch panel too: LVGL reads it only between frames (see touch_queue.h).
     touch_sample(false);
+    s_pfComposeUs += (uint32_t)(pfT1 - pfT0);
+    s_pfTouchUs += (uint32_t)(micros() - pfT1);
+    s_pfStrips++;
     const int w = (int)(area->x2 - area->x1 + 1);
     const int h = (int)(area->y2 - area->y1 + 1);
     const uint16_t angle = s_rot;
@@ -701,7 +740,9 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) 
             break;
         default: break;  // 0°
     }
+    const uint32_t pfT3 = micros();
     draw_block(dx, dy, out, dw, dh);
+    s_pfFlushUs += (uint32_t)(micros() - pfT3);             // the transfer to the panel (everything else is LVGL drawing)
     if (lv_disp_flush_is_last(drv)) s_frameCount++;
     lv_disp_flush_ready(drv);
 }
@@ -867,6 +908,7 @@ bool begin() {
     s_disp_drv.ver_res  = SCREEN_H;
     s_disp_drv.flush_cb = flush_cb;
     s_disp_drv.rounder_cb = rounder_cb;     // CO5300 needs 2-px-aligned windows
+    s_disp_drv.monitor_cb = perf_monitor_cb;   // frame-time diagnostic (see perfReset / perfLog)
     s_disp_drv.draw_buf = &s_draw_buf;
     lv_disp_drv_register(&s_disp_drv);
 
@@ -951,6 +993,108 @@ void logLvglMem(const char *tag) {
     Serial.printf("[lvgl] %s: pool %u of %u bytes in use (%u%%), peak %u, biggest free block %u\n", tag,
                   (unsigned)(m.total_size - m.free_size), (unsigned)m.total_size, (unsigned)m.used_pct,
                   (unsigned)m.max_used, (unsigned)m.free_biggest_size);
+}
+
+// Frame-time diagnostic: perfReset() clears the counters, perfLog() prints what LVGL's monitor callback
+// has accumulated since. main calls them at the start and end of a swipe between pages.
+void perfReset() {
+    s_pfFrames = 0; s_pfSumMs = 0; s_pfMaxMs = 0; s_pfSumPx = 0;
+    s_pfFlushUs = 0; s_pfComposeUs = 0; s_pfTouchUs = 0; s_pfStrips = 0;
+}
+void perfLog(const char *tag) {
+    if (!s_pfFrames) { Serial.printf("[perf] %s: no frames\n", tag); return; }
+    const unsigned frames = (unsigned)s_pfFrames;
+    const unsigned avgMs = (unsigned)(s_pfSumMs / s_pfFrames);
+    const unsigned flushMs = (unsigned)(s_pfFlushUs / 1000 / s_pfFrames);       // per frame, averaged
+    const unsigned composeMs = (unsigned)(s_pfComposeUs / 1000 / s_pfFrames);
+    const unsigned touchMs = (unsigned)(s_pfTouchUs / 1000 / s_pfFrames);
+    const int drawMs = (int)avgMs - (int)flushMs - (int)composeMs - (int)touchMs;
+    Serial.printf("[perf] %s: %u frames, avg %u ms, worst %u ms, %u px/frame, %u strips/frame\n", tag, frames, avgMs,
+                  (unsigned)s_pfMaxMs, (unsigned)(s_pfSumPx / s_pfFrames), (unsigned)(s_pfStrips / s_pfFrames));
+    Serial.printf("[perf]   of the average frame: panel transfer %u ms, sweep compositor %u ms, touch read %u ms, "
+                  "LVGL drawing (the rest) ~%d ms\n", flushMs, composeMs, touchMs, drawMs);
+}
+
+// ---- page transition (fork-only) ---------------------------------------------------------------
+// A swipe between pages becomes a smooth slide of two FINISHED pictures, instead of LVGL redrawing the
+// whole screen on every frame of a drag (about 85 ms a frame on this panel, so about 12 fps).
+//   * The page being left is already in s_phys: the compositor keeps a PSRAM copy of what is on the panel.
+//   * The page being entered is rendered ONCE into s_cap (captureBegin / captureEnd) while the panel is
+//     left alone.
+//   * Each slide frame then just copies a shifted pair of slices from the two pictures into LVGL's
+//     internal-RAM strip buffer and sends them to the panel: no LVGL work at all, so the pace is the
+//     panel transfer (about 25 to 30 ms a frame) and not the page's drawing cost.
+// Timed, with an ease-out, so the duration is the same whatever the frame rate turns out to be. Only at
+// rotation 0 and only when the compositor's PSRAM copy exists; ui.cpp falls back to LVGL's own swipe.
+static void slide_frame(int dir, int s) {
+    uint16_t *buf = (uint16_t *)s_buf1;                    // LVGL's strip buffer: nothing renders during a slide
+    const int W = SCREEN_W, H = SCREEN_H;
+    for (int y0 = 0; y0 < H; y0 += LVGL_BUF_LINES) {
+        const int rows = min(LVGL_BUF_LINES, H - y0);
+        for (int r = 0; r < rows; ++r) {
+            uint16_t *dst = buf + (size_t)r * W;
+            const uint16_t *a = s_phys + (size_t)(y0 + r) * W;     // the page being left
+            const uint16_t *b = s_cap + (size_t)(y0 + r) * W;      // the page being entered
+            if (dir > 0) {                                  // content moves left: the new page enters from the right
+                memcpy(dst, a + s, (size_t)(W - s) * 2);
+                memcpy(dst + (W - s), b, (size_t)s * 2);
+            } else {                                        // content moves right: the new page enters from the left
+                memcpy(dst, b + (W - s), (size_t)s * 2);
+                memcpy(dst + s, a, (size_t)(W - s) * 2);
+            }
+        }
+        panel_push(0, (int16_t)y0, buf, (uint16_t)W, (uint16_t)rows);
+    }
+}
+
+bool transitionReady() { return s_phys != nullptr && s_buf1 != nullptr && s_rot == 0 && !s_transition; }
+
+bool captureBegin() {
+    if (!s_cap) s_cap = (uint16_t *)heap_caps_malloc((size_t)SCREEN_W * SCREEN_H * 2, MALLOC_CAP_SPIRAM);
+    if (!s_cap) return false;
+    s_capStartMs = millis();
+    s_capturing = true;
+    return true;
+}
+
+void captureEnd() {
+    s_capturing = false;
+    Serial.printf("[slide] next page rendered offscreen in %lu ms\n", (unsigned long)(millis() - s_capStartMs));
+}
+
+// Where the time before a slide goes, per swipe. Pages: 0 radar, 1 list, 2 stats, 3 weather. The page build
+// and the aircraft-card refresh happen INSIDE the tile switch, so they are shown as parts of it.
+void slideReport(int from, int to, uint32_t tileMs, uint32_t buildMs, uint32_t cardMs, uint32_t renderMs) {
+    Serial.printf("[slide] page %d -> %d: switch tile %lu ms (of which build page %lu ms, aircraft card %lu ms), render %lu ms\n",
+                  from, to, (unsigned long)tileMs, (unsigned long)buildMs, (unsigned long)cardMs, (unsigned long)renderMs);
+}
+
+// dir > 0: to the next page (content moves left); dir < 0: to the previous one.
+void slide(int dir, uint32_t ms) {
+    if (!s_phys || !s_cap || !s_buf1) return;
+    s_transition = true;
+    const uint32_t t0 = millis();
+    int frames = 0, lastS = -1;
+    for (;;) {
+        const uint32_t el = millis() - t0;
+        const float t = el >= ms ? 1.0f : (float)el / (float)ms;
+        const float u = 1.0f - t;
+        const int s = (int)lroundf((1.0f - u * u * u) * (float)SCREEN_W);   // ease-out: quick start, gentle stop
+        if (s != lastS) {
+            slide_frame(dir, s);
+            lastS = s;
+            ++frames;
+        }
+        if (t >= 1.0f) break;
+    }
+    // The panel now shows the new page, so it becomes the compositor's reference picture; the old one is
+    // kept in s_cap as the buffer for the next slide.
+    uint16_t *old = s_phys;
+    s_phys = s_cap;
+    s_cap = old;
+    s_transition = false;
+    const unsigned long total = (unsigned long)(millis() - t0);
+    Serial.printf("[slide] %d frames in %lu ms (%lu ms a frame)\n", frames, total, frames ? total / (unsigned long)frames : 0UL);
 }
 
 } // namespace display
