@@ -79,9 +79,12 @@
 // ---------- Haptics: DRV2605L ----------
 // Waveshare's setup: ERM mode, ERM open-loop, library 1, internal trigger.
 #define I2C_ADDR_HAPTIC     0x5A
-// Effect played on each knob click (library 1, the vendor's numbering): 5 = Sharp Click 60%.
-// Tune by feel: 4/5/6 = Sharp Click 100/60/30%, 7/8/9 = Soft Bump 100/60/30%, 1/2/3 = Strong Click.
-#define HAPTIC_TICK_EFFECT  5
+// Effect played on each knob click (library 1, the vendor's numbering): 1 = Strong Click 100%, the heaviest single
+// click this chip's library has. It was 5 (Sharp Click 60%), which was too light. Tune by feel, strongest to lightest:
+// 1 Strong Click 100%, 4 Sharp Click 100% (crisper, shorter), 2 Strong 60%, 5 Sharp 60%, 3 Strong 30%, 6 Sharp 30%;
+// 7/8/9 = Soft Bump 100/60/30% are rounder and gentler. The drive voltage is left at the chip's defaults (as in
+// Waveshare's demo), because the motor's rating is not known and over-driving an ERM motor can damage it.
+#define HAPTIC_TICK_EFFECT  1
 
 // While the knob is turning, the aircraft detail card stays hidden; it appears once the ring has
 // been still for this long (ms). The selected plane stays highlighted on the scope meanwhile.

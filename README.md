@@ -68,7 +68,7 @@ The original targets 466 x 466 AMOLED boards with a PMIC, audio codec and IMU. T
 | Display | 1.8" round, 360 x 360, **ST77916** over QSPI. Backlight on GPIO 47 |
 | Touch | **CST816D**, I2C address `0x15` (SDA GPIO 11, SCL GPIO 12) |
 | Rotary knob | Two-pin encoder: GPIO 8 (A, clockwise = +1) and GPIO 7 (B), read by a 3 ms timer |
-| Haptics | **DRV2605L**, I2C address `0x5A`, tick effect 5 |
+| Haptics | **DRV2605L**, I2C address `0x5A`, one click effect per knob step (`HAPTIC_TICK_EFFECT`, currently 1) |
 | Battery | Sense on GPIO 1 (ADC behind a divide-by-two); shown only while USB is not connected |
 | Not used | GPS (the board has none), the DAC/audio, the TF card slot |
 
@@ -283,6 +283,7 @@ Behaviour is set by macros in [`src/boards/board_knob_18.h`](src/boards/board_kn
 | `BOOT_VIEW` | `0` | Page shown at start (0 radar, 1 list, 2 settings, 3 weather) |
 | `IDLE_DIM_MS` | `60000` | Idle time before the clock; a value saved from the config page wins |
 | `KNOB_CARD_DELAY_MS` | `1500` | How long the knob must be still before the info card returns |
+| `HAPTIC_TICK_EFFECT` | `1` | The haptic click on each knob step: a DRV2605L library 1 effect number. 1 (Strong Click 100%) is the strongest; 4 is crisper; 5 (Sharp Click 60%) was the old, lighter default. The board header lists the full ladder |
 | `SWIPE_SLIDE`, `SWIPE_SLIDE_MS` | `1`, `280` | The pre-rendered page slide, and its duration. Delete `SWIPE_SLIDE` to go back to a plain finger drag |
 | `TOUCH_SCROLL_LIMIT` | `16` | How far (px) a finger may drift and still count as a tap (LVGL's default is 10) |
 | `AIRPORT_SELECT` | `1` | Airport crosses, selection, info card and list rows |
