@@ -13,9 +13,6 @@
 #include "airports.h"
 #include "clock_face.h"
 #include <lvgl.h>
-#if defined(ARDUINO)
-#include <Arduino.h>              // millis() / Serial for the reprojection timing line in update()
-#endif
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -1259,19 +1256,8 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
     if (s.homeLat != s_coLat || s.homeLon != s_coLon || s.rangeKm != s_coRange) {
         const bool firstFix = (s_coRange < 0.0f);
         s_coLat = s.homeLat; s_coLon = s.homeLon; s_coRange = s.rangeKm;
-#if defined(ARDUINO)
-        const uint32_t pjT0 = millis();
-#endif
         coastline_project(s.homeLat, s.homeLon, s.rangeKm, s_cx, s_cy, R);
-#if defined(ARDUINO)
-        const uint32_t pjT1 = millis();
-#endif
         airports_project(s.homeLat, s.homeLon, s.rangeKm, s_cx, s_cy, R);
-#if defined(ARDUINO)
-        // How long a zoom / home change blocks the UI (the coastline scan is double-precision maths).
-        Serial.printf("[radar] scope reprojected for %.0f km: coastline %lu ms, airports %lu ms\n", (double)s.rangeKm,
-                      (unsigned long)(pjT1 - pjT0), (unsigned long)(millis() - pjT1));
-#endif
 #if defined(AIRPORT_SELECT)
         {   // a zoom or a new centre can leave the selected airport outside the scope: then it is no longer selected
             int apIdx;

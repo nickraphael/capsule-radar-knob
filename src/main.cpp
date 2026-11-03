@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <vector>
+#include <algorithm>                 // std::remove_if: the military-only filter on a held snapshot
 #include "config.h"
 #include "web_input.h"              // strict parsing of numbers from the config page
 #include "aircraft.h"
@@ -91,6 +92,9 @@ static volatile bool         g_rtcSyncPending = false;               // SNTP syn
 static std::vector<Aircraft> g_snap;                                 // last snapshot (instant re-render on zoom)
 static volatile bool         g_requery = false;                      // range changed -> adsb_task re-begins
 static float                 g_requeryKm = 0.0f;
+// Set when the military filter changes: the NEXT feed result replaces the display even if it is empty (see adsb_task),
+// and until it has arrived a poll the providers' spacing refused is retried at once instead of a poll interval later.
+static volatile bool         g_forcePublish = false;
 static volatile bool         g_feedOk = true;                        // ADS-B feed healthy? (HUD warning)
 static volatile uint32_t     g_lastFeedOkMs = 0;                     // millis() of the last good poll (HUD staleness)
 static volatile uint32_t     g_powerOffAtMs = 0;                     // !=0: AXP2101 power-off when millis() reaches it
@@ -205,12 +209,19 @@ static void adsb_task(void*) {
                     watchdog.onPoll(FeedWatchdog::FETCHED, receivedMs);
                     g_lastFeedOkMs = receivedMs;      // HUD: mark data as fresh
 
-                    const bool publish = snapshotGate.shouldPublish(
-                        !fresh.empty(), receivedMs, AC_STALE_MS);
+                    // The first result after the military filter changes replaces the display at once, even if it is
+                    // empty: no military aircraft in range is a real answer, not a glitch. Otherwise an empty result is
+                    // held back first (a provider can send one by mistake): AC_STALE_MS normally, but only 6 s with the
+                    // military filter on, where empty is common and a contact that has left should not hang about.
+                    const bool forced = g_forcePublish;
+                    g_forcePublish = false;
+                    const uint32_t emptyGraceMs = g_milOnly ? 6000u : (uint32_t)AC_STALE_MS;
+                    const bool publish = forced || snapshotGate.shouldPublish(
+                        !fresh.empty(), receivedMs, emptyGraceMs);
                     if (!publish) {
                         if (!retainingEmptySnapshot) {
                             Serial.printf("[adsb] empty snapshot; retaining contacts for %u ms\n",
-                                          (unsigned)AC_STALE_MS);
+                                          (unsigned)emptyGraceMs);
                             retainingEmptySnapshot = true;
                         }
                     } else {
@@ -230,6 +241,9 @@ static void adsb_task(void*) {
                     // Prolonged silence still trips the warning, via the time check rather
                     // than a fail count. Not proof of life for the watchdog: nothing was sent.
                     watchdog.onPoll(FeedWatchdog::SKIPPED, nowMs);
+                    // A military-filter change is waiting for fresh data: try again at the next 250 ms tick, not a whole
+                    // poll interval later. (Nothing was sent, and cooling() still keeps to each provider's spacing.)
+                    if (g_forcePublish) lastPoll = 0;
                     if ((int32_t)(nowMs - g_adsb.lastOkMs()) > (int32_t)ADSB_FEED_STALE_MS)
                         g_feedOk = false;
                 } else {
@@ -389,18 +403,38 @@ static void onRangeChange(float km) {
     ui_on_data_updated();
 }
 
-// The Settings page's "Military only" checkbox (boards with SETTINGS_PAGE; harmless elsewhere): the same setting
-// the config page has, done the same way, then a re-poll NOW so the scope changes within a fetch instead of after
-// the usual interval.
-static void onMilOnlyChange(bool on) {
+// Keep only the military-flagged aircraft. The feed client does this while it parses; this does the same to a
+// snapshot we already hold.
+static void keepMilitaryOnly(std::vector<Aircraft> &v) {
+    v.erase(std::remove_if(v.begin(), v.end(), [](const Aircraft &a) { return !a.military; }), v.end());
+}
+
+// Turn the military-only filter on or off (the Settings page checkbox and the config page both come here) and show
+// the result at once instead of at the next poll:
+//  - ON: the last snapshot holds every aircraft, so just drop the civil ones now. The next result then confirms it.
+//  - OFF: the civil aircraft were never kept, so they have to be fetched; ask for that right away and let the
+//    next result (empty or not) replace the display without the usual hold-back, see g_forcePublish.
+// Either way the scope is redrawn straight away, so a filter that leaves nothing shows the empty scope with its
+// map and airports, not the previous picture.
+static void applyMilOnly(bool on) {
     g_milOnly = on;
     g_adsb.setMilitaryOnly(on);
+    if (on) keepMilitaryOnly(g_snap);
+    g_forcePublish = true;
+    g_requeryKm = queryRadiusKm();
+    g_requery = true;
+    radar::update(g_snap, g_settings);
+    ui_on_data_updated();
+}
+
+// The Settings page's "Military only" checkbox (boards with SETTINGS_PAGE; harmless elsewhere): the same setting
+// as the config page's, applied the same way, and saved.
+static void onMilOnlyChange(bool on) {
+    applyMilOnly(on);
     Preferences p;
     p.begin("capsuleradar", false);
     p.putBool("milonly", on);
     p.end();
-    g_requeryKm = queryRadiusKm();
-    g_requery = true;
 }
 
 // Persist the visual theme in NVS (called when the user long-presses to switch).
@@ -990,11 +1024,10 @@ static void handleAltMax() {   // maximum-altitude feed filter, ft (applies from
     g_web.send(200, "text/plain", "ok");
 }
 
-static void handleMilOnly() {   // military-only feed filter (applies from the next poll)
+static void handleMilOnly() {   // military-only filter: shows at once on what is held, then confirmed by the next poll
     if (refuseUnlessPageFetch()) return;
     if (g_web.hasArg("v")) {
-        g_milOnly = g_web.arg("v").toInt() != 0;
-        g_adsb.setMilitaryOnly(g_milOnly);
+        applyMilOnly(g_web.arg("v").toInt() != 0);
         ui_set_military_only(g_milOnly);          // keep the Settings page's checkbox in step (a no-op on other boards)
         if (g_web.hasArg("save")) {
             Preferences p;
@@ -1247,17 +1280,6 @@ void setup() {
             q.end();
         });
 #endif
-#if defined(PIN_ENC_A)
-        // Frame-time diagnostic: one serial line per swipe between pages, with how many frames LVGL drew,
-        // the average and worst time per frame, and the pixels per frame. Page: 0 radar, 1 list, 2 stats,
-        // 3 weather. A swipe that feels laggy shows as a high average or worst time.
-        ui_set_swipe_cb([](bool begin, int view) {
-            if (begin) { display::perfReset(); return; }
-            char tag[40];
-            snprintf(tag, sizeof(tag), "swipe settled on page %d", view);
-            display::perfLog(tag);
-        });
-#endif
         radar::setTrailLength(g_trailLen);
         radar::setMaxOnScreen(g_maxAc);
         radar::setLabelHideMin(g_labelHideMin);
@@ -1270,6 +1292,11 @@ void setup() {
     ui_set_military_only(g_milOnly);             // ...showing the saved state
     ui_set_units(g_units);                       // apply saved unit preset
     ui_set_range_km(g_settings.rangeKm);         // show the loaded range
+    // Set the scope up NOW (coastline, airports, the list's airports) rather than at the first published snapshot,
+    // which can be a long way off: an empty feed result (military only with none in range, or quiet airspace) is held
+    // back for seconds, and until something is published the scope, its airports and the list all stay blank.
+    radar::update(g_snap, g_settings);
+    ui_on_data_updated();
     // (power-off button: registered below, only when the PMIC actually answered)
 
     imu_begin();       // face-down sleep (no-op if the IMU isn't detected)
@@ -1289,11 +1316,6 @@ void setup() {
     rtc_seed_clock();                   // offline clock/date from the PCF85063
     knob_begin();                       // rotary knob sampler (no-op on boards without one)
     haptic_begin();                     // DRV2605L (no-op on boards without one)
-#if defined(PIN_ENC_A)
-    // Which build is this? States what this firmware was compiled with, so a stale flash is obvious.
-    Serial.printf("[knob] built with: card delay %d ms, photo max %dx%d px\n",
-                  (int)KNOB_CARD_DELAY_MS, (int)PH_MAXW, (int)PH_MAXH);
-#endif
     // The system clock may be RTC-seeded (looks valid, might drift). Only a real SNTP
     // sync may write the RTC back — the callback flags each sync, the 5 s tick (core 1)
     // does the I2C write, at most hourly.
@@ -1491,6 +1513,7 @@ void loop() {
             g_snap.swap(g_aircraft);   // O(1) handoff under the lock; render on g_snap outside it.
             g_acDirty = false;         // g_aircraft now holds the previous snapshot (overwritten next poll)
             xSemaphoreGive(g_ac_mutex);
+            if (g_milOnly) keepMilitaryOnly(g_snap);   // a result fetched just before the filter went on can still hold civil aircraft
             radar::update(g_snap, g_settings); // rebuild the glyph/trail layer
             ui_on_data_updated();              // refresh card/list/stats
             checkAudioEvents();                // ping new-in-range / emergency / military
@@ -1612,45 +1635,17 @@ void loop() {
     // and sends the idle clock away exactly like a touch does (the idle block below); that first
     // click ONLY wakes: the selection does not move, as with touch. Radar view only.
     {
-        static bool holdPending = false;     // a knob selection is waiting for its card to appear
-        static uint32_t lastSelMs = 0;
-        // Measure the debounce on the device: one log line, when the card appears after knob use.
-        if (holdPending) {
-            if (ui_card_visible()) {
-                Serial.printf("[knob] card shown %lu ms after the last click\n", (unsigned long)(millis() - lastSelMs));
-                holdPending = false;
-            } else if (millis() - lastSelMs > 8000) {
-                holdPending = false;         // landed on "none" or the plane left the feed: no card to wait for
-            }
-        }
-        // List wheel diagnostics: LVGL's memory-pool use when the list comes into view, and again once
-        // the ring has settled (the list's rows are what the pool is tight for).
-        static bool listWasActive = false, listLogPending = false;
-        static uint32_t lastListMs = 0;
-        const bool listNow = ui_list_active();
-        if (listNow && !listWasActive) display::logLvglMem("list shown");
-        listWasActive = listNow;
-        if (listLogPending && millis() - lastListMs > 2000) {
-            display::logLvglMem("2 s after the last knob scroll");
-            listLogPending = false;
-        }
         const int clicks = knob_take();
         if (clicks != 0) {
             const bool wasIdle = g_idle || radar::clockRequested();    // state BEFORE this click
             display::noteActivity();
             if (!wasIdle && ui_list_active()) {
-                if (ui_list_scroll(clicks)) {    // the list is a wheel: one row per click
-                    haptic_tick();
-                    listLogPending = true;
-                    lastListMs = millis();
-                }
+                if (ui_list_scroll(clicks)) haptic_tick();    // the list is a wheel: one row per click
             } else if (!wasIdle && ui_weather_active()) {
                 if (ui_weather_cycle(clicks)) haptic_tick();     // weather page: the ring flips radar / clouds / forecast
             } else if (!wasIdle && ui_sweep_visible() && radar::cycleSelection(clicks)) {
                 ui_knob_selection_changed();     // hides the card; it returns after the ring is still for KNOB_CARD_DELAY_MS
                 haptic_tick();
-                holdPending = true;              // the measurement above logs when the card comes back
-                lastSelMs = millis();
             }
         }
     }

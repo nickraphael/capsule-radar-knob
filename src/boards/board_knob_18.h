@@ -29,7 +29,7 @@
 // table matches Arduino_GFX's st77916 table in structure and in the C0-CB / D0-D2 blocks, and
 // the factory firmware contains an ST77916 driver class. The init table itself is Waveshare's
 // panel-tuned one, generated into boards/st77916_knob_init.h by bringup/gen_init.py (that file
-// is git-ignored: the demo has no license). Run that script before building this board.
+// is committed; the demo it came from has no license, so see its header). Rerun that script only to regenerate it.
 #define PIN_LCD_CS          14
 #define PIN_LCD_SCLK        13             // QSPI PCLK
 #define PIN_LCD_D0          15
@@ -151,39 +151,43 @@
 #define SEL_FLASH_MS        1000
 #define SEL_FLASH_MIN_OPA   45
 
-// ---------- Stats and weather tiles on the round 360 glass ----------
-// Stats: offsets from the panel centre (px). The stats block is 7 lines of size-16 text (~126 px tall),
-// the footer is 3 lines of size 14 (~48 px; widest line ~255 px: IP and coordinates) and the version
-// line is size 12. The 466 px layout put the footer 77 px below the stats and the version line at +170,
-// where a 360 glass is only ~75 px wide, so both ran off the bottom. These group them (14 px between
-// stats and footer) and centre the group vertically under the title.
-#define STATS_LBL_Y         -36
-// The Settings page, top to bottom, as offsets from the middle of the glass (px). The title sits at -158..-140.
+// ---------- Radar page overlay ----------
+// The aircraft count and the clock, in the row just under the N, are not created on this board (the idle clock
+// still works; it is a separate thing). The date under that row, and the battery percentage when running on
+// battery, stay. Delete either line to bring that label back.
+#define HUD_HIDE_COUNT      1
+#define HUD_HIDE_CLOCK      1
+
+// ---------- Settings page and weather tiles on the round 360 glass ----------
+// The Settings page (the shared code calls it the Stats tile), top to bottom, as offsets from the middle of
+// the glass (px). The title sits at -158..-140.
 //   "Range" + dropdown                -128..-76    (52 px tall; its list opens downward over the page)
-//   "Military only" checkbox           -64..-10    (a 54 px tick box; the whole row is the target)
-//   "Wifi strength" + bars               8..24
-//   "Configure at..." (3 lines of 14)   42..90
-//   version line (size 12)             110..124
-// (This glass is about 8 px per mm, so a fingertip target wants 55 px or more; the two controls are about that,
-// and each has a hit zone reaching a further 14 px out.)
+//   "Theme" + dropdown                 -64..-12    (52 px tall, the same look as Range)
+//   "Military only" checkbox             0..54     (a 54 px tick box; the whole row is the target)
+//   "Wifi strength" + bars              66..82
+//   "Configure at..." (3 lines of 14)   92..140
+// The version text is gone (STATS_HIDE_VERSION) to make room; it is still in the boot log.
+// (This glass is about 8 px per mm, so a fingertip target wants 55 px or more; the controls are about that. Rows are
+// 12 px apart and each control's hit zone reaches 6 px beyond its box, so neighbouring zones just meet and a tap near
+// the edge of one is never taken by the next.)
 #define STATS_RANGE_Y       -102
-#define STATS_MIL_Y         -37
-#define STATS_WIFI_Y        16
-#define STATS_NET_Y         66
-#define STATS_VER_Y         117
+#define STATS_THEME_Y       -38
+#define STATS_MIL_Y         27
+#define STATS_WIFI_Y        74
+#define STATS_NET_Y         116
+#define STATS_HIDE_VERSION  1
 // The range is chosen on this page (a dropdown under the title); the radar page's zoom button is gone, and it
 // just shows the current range as plain text where the button was.
 #define RANGE_ON_STATS      1
 // This board's Stats page is its SETTINGS page: titled SETTINGS, with the aircraft count / nearest / feed text
-// block gone, and a "Military only" checkbox (the same setting as the config page's) under the range dropdown.
+// block gone, a Theme dropdown under Range (the same choice as the long-press and the config page), and a
+// "Military only" checkbox (the same setting as the config page's) under that.
 #define SETTINGS_PAGE       1
 // How far (px) a finger may drift between touching a button and lifting and still count as a TAP. Past it LVGL
 // takes the touch for the start of a swipe: a dropdown or checkbox then stays as it was (and the page can slide).
 // LVGL's own default is 10; a fingertip on a screen this small rolls more than that. Swipes just need to be 16 px
 // instead of 10 before they are recognised.
 #define TOUCH_SCROLL_LIMIT  16
-// "Nearest" on one line (callsign and distance together), instead of the distance on a second line.
-#define STATS_ONE_LINE_NEAREST 1
 // The network text under the wifi bars shows just the IP address, without the centre point's coordinates.
 #define STATS_NET_NO_GEO    1
 // Weather: its layout is positioned from the panel's TOP edge, for a 462 px panel. Centred on this

@@ -55,6 +55,7 @@ static char s_lastRouteReq[12] = "";
 static lv_obj_t *s_hudWifi = nullptr, *s_hudCount = nullptr, *s_hudClock = nullptr, *s_hudBatt = nullptr, *s_hudDate = nullptr;
 static lv_obj_t *s_hudBars[4] = { nullptr, nullptr, nullptr, nullptr };   // WiFi signal-strength bars
 static lv_obj_t *s_list = nullptr;
+static lv_obj_t *s_listEmptyLbl = nullptr;   // "No aircraft or airports in range": shown by build_list() when the list has no rows
 static lv_obj_t *s_statsLbl = nullptr;
 static lv_obj_t *s_statsNet = nullptr;
 static lv_obj_t *s_hudGps   = nullptr;   // HUD satellite icon (hidden unless GPS auto-location is on)
@@ -435,6 +436,9 @@ void ui_set_range_cb(void (*cb)(float)) { s_rangeCb = cb; }
 
 #if defined(RANGE_ON_STATS)
 // ---- the range selector on the Stats page (fork-only: boards that define RANGE_ON_STATS) ----
+#if defined(SETTINGS_PAGE)
+#define HAS_THEME_SELECTOR 1       // the Settings page also gets a Theme dropdown, built like this one (see make_theme_selector)
+#endif
 // A dropdown under the STATS title listing the RANGE_STEPS_KM distances, in the user's unit. It replaces the
 // zoom button that used to sit on the radar page, which now shows the range as plain text.
 static lv_obj_t *s_rangeDd = nullptr;        // the dropdown
@@ -469,6 +473,34 @@ static void range_selector_refresh(void) {
 // it would otherwise stay up over another page.
 static void range_dropdown_close(void) {
     if (s_rangeDd && lv_obj_has_state(s_rangeDd, LV_STATE_CHECKED)) lv_dropdown_close(s_rangeDd);
+}
+
+#if defined(HAS_THEME_SELECTOR)
+static lv_obj_t *s_themeDd = nullptr;        // the Theme dropdown
+static lv_obj_t *s_themeCap = nullptr;       // the "Theme" caption beside it
+static_assert(THEME_COUNT == 4, "the Theme dropdown lists four names: update make_theme_selector when themes change");
+
+static void theme_dropdown_close(void) {
+    if (s_themeDd && lv_obj_has_state(s_themeDd, LV_STATE_CHECKED)) lv_dropdown_close(s_themeDd);
+}
+
+// Show the theme that is really active: the long-press and the config page change it too. Not while its list is
+// open (this runs on every poll while the page is up, and setting the selection would jump the open list), and
+// only when it differs.
+static void theme_selector_refresh(void) {
+    if (!s_themeDd || lv_obj_has_state(s_themeDd, LV_STATE_CHECKED)) return;
+    const uint16_t cur = (uint16_t)radar::theme();
+    if (lv_dropdown_get_selected(s_themeDd) != cur) lv_dropdown_set_selected(s_themeDd, cur);
+}
+#endif
+
+// Close every open dropdown list on the Settings page. A list is not a child of the page while open (LVGL moves it
+// onto the screen), so it would otherwise stay up over another page.
+static void settings_lists_close(void) {
+    range_dropdown_close();
+#if defined(HAS_THEME_SELECTOR)
+    theme_dropdown_close();
+#endif
 }
 
 // A range was picked from the list.
@@ -1038,6 +1070,10 @@ static void build_list(void) {
         s_rowStylesInit = true;
     }
     const int n = list_total();                                   // the aircraft, then the airports inside the scope
+    if (s_listEmptyLbl) {                                         // nothing to list at all: say so, rather than show a blank page
+        if (n == 0) lv_obj_clear_flag(s_listEmptyLbl, LV_OBJ_FLAG_HIDDEN);
+        else        lv_obj_add_flag(s_listEmptyLbl, LV_OBJ_FLAG_HIDDEN);
+    }
 #if defined(LIST_WHEEL)
     AcInfo selInfo;
     const bool haveSel = radar::selected(selInfo);                // the aircraft selected on the radar (or by this list)
@@ -1136,6 +1172,9 @@ static void build_list(void) {
 }
 
 static void build_stats(void) {
+#if defined(HAS_THEME_SELECTOR)
+    theme_selector_refresh();                   // the Settings page's Theme row shows the active theme (the long-press and the config page change it too)
+#endif
     if (!s_statsLbl) return;
     const int n = radar::count();
     int emg = 0;
@@ -1151,20 +1190,6 @@ static void build_stats(void) {
     char altH[16];
     fmt_alt(altH, sizeof(altH), (highest > -1e8f) ? highest : 0.0f, false);
     char st[260];
-#if defined(STATS_ONE_LINE_NEAREST)
-    // "Nearest" is ONE line (callsign and distance together): it used to put the distance on a second line.
-    char nearS[40];
-    if (n) snprintf(nearS, sizeof(nearS), "%s  %.1f %s", nearestCall, dist_val(nearest), dist_unit());
-    else   snprintf(nearS, sizeof(nearS), "-");
-    snprintf(st, sizeof(st),
-             "Aircraft   %d\n"
-             "Emergency  %d\n"
-             "Nearest    %s\n"
-             "Highest    %s\n"
-             "Range      %.0f %s\n"
-             "Feed       %s",
-             n, emg, nearS, altH, dist_val(s_rangeKm), dist_unit(), s_feedHost);
-#else
     snprintf(st, sizeof(st),
              "Aircraft   %d\n"
              "Emergency  %d\n"
@@ -1175,7 +1200,6 @@ static void build_stats(void) {
              "Feed       %s",
              n, emg, n ? nearestCall : "-", dist_val(n ? nearest : 0.0f), dist_unit(),
              altH, dist_val(s_rangeKm), dist_unit(), s_feedHost);
-#endif
     lv_label_set_text(s_statsLbl, st);
 }
 
@@ -1468,10 +1492,6 @@ void ui_set_weather_forecast(bool forecast) {
 // Rebuild whichever of list/stats is currently on screen (called on poll and on swipe).
 static void (*s_viewChangedCb)(int) = nullptr;
 void ui_set_view_changed_cb(void (*cb)(int idx)) { s_viewChangedCb = cb; }
-// Fired when a swipe between pages starts (begin = true) and when it has come to rest (begin = false,
-// view = the page it ended on). Used only for the frame-time diagnostic.
-static void (*s_swipeCb)(bool, int) = nullptr;
-void ui_set_swipe_cb(void (*cb)(bool begin, int view)) { s_swipeCb = cb; }
 // The knob changed the radar selection (fork-only). Hide the card now and (re)start the debounce:
 // every further click restarts the KNOB_CARD_DELAY_MS wait, and the card shows only once the ring
 // has been still for that long. The selected plane stays highlighted on the scope meanwhile.
@@ -1492,7 +1512,6 @@ void ui_knob_selection_changed(void) {
     }
     lv_timer_reset(s_cardHoldTimer);     // count the delay from THIS click
 }
-bool ui_card_visible(void) { return s_card && !lv_obj_has_flag(s_card, LV_OBJ_FLAG_HIDDEN); }
 
 // ---------------------------------------------------------------- idle clock
 // radar_view's scene steps. From the first one the HUD, the zoom button and the card make
@@ -1648,6 +1667,15 @@ static lv_obj_t *make_tile_title(lv_obj_t *tile, const char *txt) {
 #ifndef STATS_MIL_Y             // the "Military only" checkbox on the Settings page (SETTINGS_PAGE), under the dropdown
 #define STATS_MIL_Y -37
 #endif
+#ifndef STATS_THEME_Y           // the Theme dropdown on the Settings page (SETTINGS_PAGE), under Range
+#define STATS_THEME_Y -38
+#endif
+// How far a Settings page control's hit zone reaches beyond its box (px). The rows are 12 px apart, so two zones just
+// meet: a tap near the edge of one control can never be taken by its neighbour. (14 px, as it was, would have let the
+// lower control steal the bottom of the one above.)
+#ifndef SELECTOR_EXT_PX
+#define SELECTOR_EXT_PX 6
+#endif
 
 // A full-screen round panel that clips its content to the circle (for list/stats views).
 static lv_obj_t *make_round_panel(lv_obj_t *parent, int d = ROUND_PANEL_D, bool plain = false) {
@@ -1795,19 +1823,16 @@ void ui_splash_show(void) {
 }
 
 // What happens when a different page becomes the active one. It runs from the tileview's tile-changed
-// event, which LVGL sends for a finger drag AND, as the timing log showed, when the page slide switches
-// tiles from code (lv_obj_set_tile_id): the slide therefore only calls it itself if that event did not.
-// (It used to call it unconditionally, so every slide built the page twice.)
-static uint32_t s_arriveBuildMs = 0, s_arriveCardMs = 0;   // last arrival: page build time, aircraft-card refresh time (diagnostic)
+// event, which LVGL sends for a finger drag AND when the page slide switches tiles from code
+// (lv_obj_set_tile_id): the slide therefore only calls it itself if that event did not. (It used to call it
+// unconditionally, so every slide built the page twice.)
 static uint32_t s_arrivals = 0;                            // how many times a page has arrived (lets the slide see if LVGL's own event already ran one)
 static void page_arrived(void) {
     ++s_arrivals;
 #if defined(RANGE_ON_STATS)
-    range_dropdown_close();                      // an open range list belongs to the Stats page: it must not stay up over the next one
+    settings_lists_close();                      // an open dropdown list belongs to the Settings page: it must not stay up over the next one
 #endif
-    const uint32_t tA = lv_tick_get();
     refresh_active_tile();
-    const uint32_t tB = lv_tick_get();
 #if defined(LIST_WHEEL)
     // Back on the radar after choosing an aircraft in the list: release the hold the list set, so the
     // card (with its route and photo lookups) appears now, for the aircraft that was selected there.
@@ -1816,8 +1841,6 @@ static void page_arrived(void) {
         refresh_card();
     }
 #endif
-    s_arriveBuildMs = tB - tA;
-    s_arriveCardMs = lv_tick_get() - tB;
     if (s_viewChangedCb) s_viewChangedCb(active_view_index());   // let main remember the last view
 }
 
@@ -1828,13 +1851,6 @@ static void page_arrived(void) {
 static int  s_pendingDir = 0;      // the swipe-start handler asked for a slide that has not run yet (+1 next, -1 previous)
 static bool s_slideBusy  = false;  // a slide is being prepared or run
 #endif
-static inline bool slide_busy(void) {
-#if defined(SWIPE_SLIDE)
-    return s_slideBusy;
-#else
-    return false;
-#endif
-}
 
 #if defined(SWIPE_SLIDE)
 // Page slide (fork-only). LVGL announces a horizontal scroll of the tileview; instead of letting it redraw
@@ -1877,18 +1893,12 @@ static void run_page_slide(int dir) {
     if (next < 0 || next > 3) return;
     s_slideBusy = true;
     if (display::captureBegin()) {
-        const uint32_t t0 = lv_tick_get();
         const uint32_t arrivalsBefore = s_arrivals;
         lv_obj_set_tile_id(s_tv, (uint32_t)next, 0, LV_ANIM_OFF);   // LVGL's tile-changed event normally builds the page here
-        const uint32_t t1 = lv_tick_get();
         if (s_arrivals == arrivalsBefore) page_arrived();  // ...but if it did not, build it now (never twice)
-        const uint32_t t2 = lv_tick_get();
         lv_obj_invalidate(lv_scr_act());                   // the whole screen, so the picture is complete
         lv_refr_now(NULL);                                 // render it now; flush_cb diverts it into the picture
-        const uint32_t t3 = lv_tick_get();
         display::captureEnd();
-        display::slideReport(cur, next, t2 - t0, s_arriveBuildMs, s_arriveCardMs, t3 - t2);   // switch tile (includes the build), then render
-        (void)t1;
         display::slide(dir, SWIPE_SLIDE_MS);
     } else {
         const uint32_t arrivalsBefore = s_arrivals;
@@ -1930,6 +1940,54 @@ static void make_wifi_bars(lv_obj_t *parent, lv_align_t align, lv_coord_t x, lv_
 }
 
 #if defined(RANGE_ON_STATS)
+// Width of the caption column in the Settings page's dropdown rows: the widest caption, so every row's dropdown
+// starts at the same x whatever its caption is (the captions sit left-aligned in that column).
+static int selector_caption_w(void) {
+    lv_point_t a, b;
+    lv_txt_get_size(&a, "Range", F16(), 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    lv_txt_get_size(&b, "Theme", F16(), 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    return a.x > b.x ? a.x : b.x;
+}
+
+// The look of a Settings page dropdown and of its popup list. Range and Theme both use it, so they cannot drift apart.
+static void style_selector_dropdown(lv_obj_t *dd) {
+    lv_obj_set_style_text_font(dd, F16(), 0);
+    lv_obj_set_style_text_color(dd, UI_GREEN, 0);
+    lv_obj_set_style_bg_color(dd, UI_PANEL, 0);
+    lv_obj_set_style_bg_opa(dd, 225, 0);
+    lv_obj_set_style_border_color(dd, UI_GREEN, 0);
+    lv_obj_set_style_border_width(dd, 1, 0);
+    lv_obj_set_style_border_opa(dd, 170, 0);
+    lv_obj_set_style_radius(dd, 12, 0);
+    // This glass is about 8 px per mm, so a fingertip target wants 55 px or more. The text is 18 px tall: 18 + 2 x 17
+    // makes the box 52 px, and the hit zone reaches SELECTOR_EXT_PX beyond it on every side.
+    lv_obj_set_style_pad_ver(dd, 17, 0);
+    lv_obj_set_style_pad_hor(dd, 14, 0);
+    lv_obj_set_ext_click_area(dd, SELECTOR_EXT_PX);
+    lv_obj_set_style_shadow_width(dd, 0, 0);
+
+    // The popup list, in the same dark style, with roomier rows than the default so each is a decent touch target.
+    lv_obj_t *list = lv_dropdown_get_list(dd);
+    lv_obj_set_style_text_font(list, F16(), 0);
+    lv_obj_set_style_text_color(list, UI_GREEN, 0);
+    lv_obj_set_style_text_line_space(list, 20, 0);              // 18 px text + 20 = a 38 px row
+    lv_obj_set_style_bg_color(list, UI_PANEL, 0);
+    lv_obj_set_style_bg_opa(list, 245, 0);
+    lv_obj_set_style_border_color(list, UI_GREEN, 0);
+    lv_obj_set_style_border_width(list, 1, 0);
+    lv_obj_set_style_border_opa(list, 200, 0);
+    lv_obj_set_style_radius(list, 9, 0);
+    lv_obj_set_style_shadow_width(list, 0, 0);
+    // the current choice, and the row under the finger, are filled
+    const lv_color_t dark = lv_color_hex(0x05100A);
+    lv_obj_set_style_bg_color(list, UI_GREEN, LV_PART_SELECTED | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_opa(list, LV_OPA_COVER, LV_PART_SELECTED | LV_STATE_CHECKED);
+    lv_obj_set_style_text_color(list, dark, LV_PART_SELECTED | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(list, UI_GREEN, LV_PART_SELECTED | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(list, LV_OPA_COVER, LV_PART_SELECTED | LV_STATE_PRESSED);
+    lv_obj_set_style_text_color(list, dark, LV_PART_SELECTED | LV_STATE_PRESSED);
+}
+
 // The range selector: a "Range" caption and a dropdown beside it, one line, centred under the Stats title. The
 // caption is measured, so the pair is centred whatever the font's widths. The dropdown's list opens downward
 // over the page. Its text and selection come from range_selector_refresh().
@@ -1946,8 +2004,9 @@ static void make_range_selector(lv_obj_t *parent) {
     static const char *kRangeLabel = "Range";
     lv_point_t ls;
     lv_txt_get_size(&ls, kRangeLabel, F16(), 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    const int capW = selector_caption_w();       // the caption column, shared with the Theme row so the dropdowns line up
     const int gap = 10, ddW = 150;
-    const int total = ls.x + gap + ddW;
+    const int total = capW + gap + ddW;
 
     s_rangeCap = lv_label_create(parent);
     lv_obj_set_style_text_font(s_rangeCap, F16(), 0);
@@ -1955,51 +2014,63 @@ static void make_range_selector(lv_obj_t *parent) {
     lv_label_set_text(s_rangeCap, kRangeLabel);
     lv_obj_align(s_rangeCap, LV_ALIGN_CENTER, (lv_coord_t)(-total / 2 + ls.x / 2), STATS_RANGE_Y);
     lv_obj_add_flag(s_rangeCap, LV_OBJ_FLAG_CLICKABLE);         // labels are not clickable by default
-    lv_obj_set_ext_click_area(s_rangeCap, 14);
+    lv_obj_set_ext_click_area(s_rangeCap, SELECTOR_EXT_PX);
     lv_obj_add_event_cb(s_rangeCap, range_caption_cb, LV_EVENT_CLICKED, nullptr);
 
     s_rangeDd = lv_dropdown_create(parent);
     lv_obj_set_width(s_rangeDd, ddW);
-    lv_obj_align(s_rangeDd, LV_ALIGN_CENTER, (lv_coord_t)(-total / 2 + ls.x + gap + ddW / 2), STATS_RANGE_Y);
-    lv_obj_set_style_text_font(s_rangeDd, F16(), 0);
-    lv_obj_set_style_text_color(s_rangeDd, UI_GREEN, 0);
-    lv_obj_set_style_bg_color(s_rangeDd, UI_PANEL, 0);
-    lv_obj_set_style_bg_opa(s_rangeDd, 225, 0);
-    lv_obj_set_style_border_color(s_rangeDd, UI_GREEN, 0);
-    lv_obj_set_style_border_width(s_rangeDd, 1, 0);
-    lv_obj_set_style_border_opa(s_rangeDd, 170, 0);
-    lv_obj_set_style_radius(s_rangeDd, 12, 0);
-    // This glass is about 8 px per mm, so a fingertip target wants 55 px or more. The text is 18 px tall: 18 + 2 x 17
-    // makes the box 52 px, and the hit zone reaches another 14 px beyond it on every side (so ~80 px tall in all).
-    lv_obj_set_style_pad_ver(s_rangeDd, 17, 0);
-    lv_obj_set_style_pad_hor(s_rangeDd, 14, 0);
-    lv_obj_set_ext_click_area(s_rangeDd, 14);
-    lv_obj_set_style_shadow_width(s_rangeDd, 0, 0);
+    lv_obj_align(s_rangeDd, LV_ALIGN_CENTER, (lv_coord_t)(-total / 2 + capW + gap + ddW / 2), STATS_RANGE_Y);
+    style_selector_dropdown(s_rangeDd);
     lv_obj_add_event_cb(s_rangeDd, range_changed_cb, LV_EVENT_VALUE_CHANGED, nullptr);
-
-    // The popup list, in the same dark style, with roomier rows than the default so each is a decent touch target.
-    lv_obj_t *list = lv_dropdown_get_list(s_rangeDd);
-    lv_obj_set_style_text_font(list, F16(), 0);
-    lv_obj_set_style_text_color(list, UI_GREEN, 0);
-    lv_obj_set_style_text_line_space(list, 20, 0);              // 18 px text + 20 = a 38 px row
-    lv_obj_set_style_bg_color(list, UI_PANEL, 0);
-    lv_obj_set_style_bg_opa(list, 245, 0);
-    lv_obj_set_style_border_color(list, UI_GREEN, 0);
-    lv_obj_set_style_border_width(list, 1, 0);
-    lv_obj_set_style_border_opa(list, 200, 0);
-    lv_obj_set_style_radius(list, 9, 0);
-    lv_obj_set_style_shadow_width(list, 0, 0);
-    // the current range, and the row under the finger, are filled
-    const lv_color_t dark = lv_color_hex(0x05100A);
-    lv_obj_set_style_bg_color(list, UI_GREEN, LV_PART_SELECTED | LV_STATE_CHECKED);
-    lv_obj_set_style_bg_opa(list, LV_OPA_COVER, LV_PART_SELECTED | LV_STATE_CHECKED);
-    lv_obj_set_style_text_color(list, dark, LV_PART_SELECTED | LV_STATE_CHECKED);
-    lv_obj_set_style_bg_color(list, UI_GREEN, LV_PART_SELECTED | LV_STATE_PRESSED);
-    lv_obj_set_style_bg_opa(list, LV_OPA_COVER, LV_PART_SELECTED | LV_STATE_PRESSED);
-    lv_obj_set_style_text_color(list, dark, LV_PART_SELECTED | LV_STATE_PRESSED);
+#if defined(HAS_THEME_SELECTOR)
+    lv_obj_add_event_cb(s_rangeDd, [](lv_event_t *) { theme_dropdown_close(); }, LV_EVENT_READY, nullptr);   // READY = its list opened: only one list at a time
+#endif
 
     range_selector_refresh();                    // the options (in the user's unit), the selection and the shown text
 }
+
+#if defined(HAS_THEME_SELECTOR)
+// ---- the Theme selector: a "Theme" caption and a dropdown under Range, built the same way ----
+// Picking a theme calls radar::setTheme(), which redraws the scope and tells main to save the choice, exactly as the
+// long-press does. theme_selector_refresh() keeps the shown theme in step when something else changes it.
+static void theme_changed_cb(lv_event_t *e) {
+    radar::setTheme((int)lv_dropdown_get_selected(lv_event_get_target(e)));
+}
+
+static void theme_caption_cb(lv_event_t *e) {   // a tap on the caption does what a tap on the dropdown does
+    (void)e;
+    if (!s_themeDd) return;
+    if (lv_obj_has_state(s_themeDd, LV_STATE_CHECKED)) lv_dropdown_close(s_themeDd);
+    else                                               lv_dropdown_open(s_themeDd);
+}
+
+static void make_theme_selector(lv_obj_t *parent) {
+    static const char *kThemeLabel = "Theme";
+    lv_point_t ls;
+    lv_txt_get_size(&ls, kThemeLabel, F16(), 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    const int capW = selector_caption_w();       // the same caption column as the Range row, so the two dropdowns line up
+    const int gap = 10, ddW = 150;
+    const int total = capW + gap + ddW;
+
+    s_themeCap = lv_label_create(parent);
+    lv_obj_set_style_text_font(s_themeCap, F16(), 0);
+    lv_obj_set_style_text_color(s_themeCap, UI_SOFT, 0);
+    lv_label_set_text(s_themeCap, kThemeLabel);
+    lv_obj_align(s_themeCap, LV_ALIGN_CENTER, (lv_coord_t)(-total / 2 + ls.x / 2), STATS_THEME_Y);
+    lv_obj_add_flag(s_themeCap, LV_OBJ_FLAG_CLICKABLE);         // labels are not clickable by default
+    lv_obj_set_ext_click_area(s_themeCap, SELECTOR_EXT_PX);
+    lv_obj_add_event_cb(s_themeCap, theme_caption_cb, LV_EVENT_CLICKED, nullptr);
+
+    s_themeDd = lv_dropdown_create(parent);
+    lv_dropdown_set_options(s_themeDd, "Phosphor\nOrb\nAmber CRT\nMilitary");   // in RadarTheme order (see the static_assert above)
+    lv_obj_set_width(s_themeDd, ddW);
+    lv_obj_align(s_themeDd, LV_ALIGN_CENTER, (lv_coord_t)(-total / 2 + capW + gap + ddW / 2), STATS_THEME_Y);
+    style_selector_dropdown(s_themeDd);
+    lv_obj_add_event_cb(s_themeDd, theme_changed_cb, LV_EVENT_VALUE_CHANGED, nullptr);
+    lv_obj_add_event_cb(s_themeDd, [](lv_event_t *) { range_dropdown_close(); }, LV_EVENT_READY, nullptr);   // READY = its list opened: only one list at a time
+    lv_dropdown_set_selected(s_themeDd, (uint16_t)radar::theme());
+}
+#endif
 #endif
 
 #if defined(SETTINGS_PAGE)
@@ -2034,7 +2105,7 @@ static void make_military_checkbox(lv_obj_t *parent) {
     lv_obj_set_style_text_color(s_milCheck, UI_INK, 0);
     lv_obj_set_style_pad_column(s_milCheck, 14, 0);                          // box to text
     // The tick box is the text height (18 px) plus the padding and border all round: 18 + 2 x (16 + 2) = 54 px,
-    // about 7 mm on this glass, where the stock box is about half that. The hit zone reaches another 14 px out.
+    // about 7 mm on this glass, where the stock box is about half that. The hit zone reaches SELECTOR_EXT_PX further out.
     lv_obj_set_style_pad_all(s_milCheck, 16, LV_PART_INDICATOR);
     lv_obj_set_style_radius(s_milCheck, 12, LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(s_milCheck, UI_PANEL, LV_PART_INDICATOR);
@@ -2045,7 +2116,7 @@ static void make_military_checkbox(lv_obj_t *parent) {
     lv_obj_set_style_text_color(s_milCheck, dark, LV_PART_INDICATOR | LV_STATE_CHECKED);     // ...with a dark tick
     lv_obj_set_style_text_font(s_milCheck, &lv_font_montserrat_28, LV_PART_INDICATOR);       // a bigger tick
     lv_obj_set_style_shadow_width(s_milCheck, 0, LV_PART_INDICATOR);
-    lv_obj_set_ext_click_area(s_milCheck, 14);
+    lv_obj_set_ext_click_area(s_milCheck, SELECTOR_EXT_PX);
     lv_obj_align(s_milCheck, LV_ALIGN_CENTER, 0, STATS_MIL_Y);
     lv_obj_add_event_cb(s_milCheck, military_changed_cb, LV_EVENT_VALUE_CHANGED, nullptr);
     if (s_milShown) lv_obj_add_state(s_milCheck, LV_STATE_CHECKED);
@@ -2077,12 +2148,6 @@ void ui_create(void) {
     // Rebuild the list/stats with the latest data the moment they slide into view
     // (between polls they'd otherwise show whatever was there when last visible).
     lv_obj_add_event_cb(s_tv, [](lv_event_t *) { page_arrived(); }, LV_EVENT_VALUE_CHANGED, nullptr);
-    // Frame-time diagnostic: tell main when a swipe between pages starts and when it has settled. Ignored while
-    // a page slide is switching tiles from code (those scroll events are not a finger swipe).
-    lv_obj_add_event_cb(s_tv, [](lv_event_t *) { if (s_swipeCb && !slide_busy()) s_swipeCb(true, active_view_index()); },
-                        LV_EVENT_SCROLL_BEGIN, nullptr);
-    lv_obj_add_event_cb(s_tv, [](lv_event_t *) { if (s_swipeCb && !slide_busy()) s_swipeCb(false, active_view_index()); },
-                        LV_EVENT_SCROLL_END, nullptr);
 #if defined(SWIPE_SLIDE)
     lv_obj_add_event_cb(s_tv, tv_scroll_begin_cb, LV_EVENT_SCROLL_BEGIN, nullptr);   // page slide takes over the swipe
 #endif
@@ -2143,17 +2208,21 @@ void ui_create(void) {
     lv_label_set_text(s_hudGps, "");             // hidden until ui_set_gps() says GPS is on
     lv_obj_align(s_hudGps, LV_ALIGN_TOP_MID, -62, 50);
 
+#if !defined(HUD_HIDE_COUNT)                     // (the knob board does not show the aircraft count; see its header)
     s_hudCount = lv_label_create(s_tileRadar);
     lv_obj_set_style_text_font(s_hudCount, F14(), 0);
     lv_obj_set_style_text_color(s_hudCount, UI_INK, 0);
     lv_label_set_text(s_hudCount, "0");
     lv_obj_align(s_hudCount, LV_ALIGN_TOP_MID, -34, 50);
+#endif
 
+#if !defined(HUD_HIDE_CLOCK)                     // (the knob board does not show the time here; see its header)
     s_hudClock = lv_label_create(s_tileRadar);
     lv_obj_set_style_text_font(s_hudClock, F14(), 0);
     lv_obj_set_style_text_color(s_hudClock, UI_INK, 0);
     lv_label_set_text(s_hudClock, "--:--");
     lv_obj_align(s_hudClock, LV_ALIGN_TOP_MID, 30, 50);
+#endif
 
     s_hudBatt = lv_label_create(s_tileRadar);
     lv_obj_set_style_text_font(s_hudBatt, F14(), 0);
@@ -2217,6 +2286,23 @@ void ui_create(void) {
     }
 #endif
 
+    // The message for a list with nothing in it (no aircraft and no airports in range, for example with the military
+    // filter on and none about). It sits in the middle, inside the focus outline on a wheel board. build_list() shows
+    // and hides it.
+    s_listEmptyLbl = lv_label_create(lp);
+    lv_label_set_text(s_listEmptyLbl, "No aircraft or airports in range");
+    lv_label_set_long_mode(s_listEmptyLbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_listEmptyLbl, 270);
+    lv_obj_set_style_text_font(s_listEmptyLbl, F14(), 0);
+    lv_obj_set_style_text_color(s_listEmptyLbl, UI_SOFT, 0);
+    lv_obj_set_style_text_align(s_listEmptyLbl, LV_TEXT_ALIGN_CENTER, 0);
+#if defined(LIST_WHEEL)
+    lv_obj_align(s_listEmptyLbl, LV_ALIGN_CENTER, 0, AC_LIST_Y_OFFSET);
+#else
+    lv_obj_align(s_listEmptyLbl, LV_ALIGN_CENTER, 0, 22);
+#endif
+    lv_obj_add_flag(s_listEmptyLbl, LV_OBJ_FLAG_HIDDEN);
+
     // --- stats tile (circular panel) ---
     lv_obj_t *sp = make_round_panel(s_tileStats);
 #if defined(SETTINGS_PAGE)
@@ -2269,10 +2355,13 @@ void ui_create(void) {
     // The open list is not part of this page, and a touch screen has no focus to lose, so a tap anywhere else
     // on the page closes it.
     lv_obj_add_flag(sp, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(sp, [](lv_event_t *) { range_dropdown_close(); }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(sp, [](lv_event_t *) { settings_lists_close(); }, LV_EVENT_CLICKED, nullptr);
+#endif
+#if defined(HAS_THEME_SELECTOR)
+    make_theme_selector(sp);                     // "Theme", under Range
 #endif
 #if defined(SETTINGS_PAGE)
-    make_military_checkbox(sp);                  // "Military only", under the range dropdown
+    make_military_checkbox(sp);                  // "Military only", under Theme
 #endif
 
     // power off (hold) -- top of the Stats view, under the title
@@ -2311,11 +2400,13 @@ void ui_create(void) {
     lv_obj_set_style_arc_rounded(s_offRing, false, LV_PART_INDICATOR);
     lv_obj_set_style_pad_all(s_offRing, 0, 0);
 
+#if !defined(STATS_HIDE_VERSION)                // (the knob board's Settings page has no room for it; see its header)
     lv_obj_t *ver = lv_label_create(sp);            // firmware version (so users can tell what's flashed)
     lv_obj_set_style_text_font(ver, F12(), 0);
     lv_obj_set_style_text_color(ver, UI_DIM, 0);
     lv_label_set_text(ver, FW_NAME " v" FW_VERSION);
     lv_obj_align(ver, LV_ALIGN_CENTER, 0, STATS_VER_Y);
+#endif
 
     // --- weather tile (current conditions + next three days) ---
     lv_obj_t *wp = make_round_panel(s_tileWeather, WEATHER_PANEL_D, WEATHER_PANEL_PLAIN);   // its layout is positioned from this panel's top edge

@@ -1,159 +1,177 @@
-# Capsule Radar 🛩️
+# Capsule Radar Knob
 
-<p align="center">
-  <a href="https://socquique.github.io/capsule-radar/"><img src="https://img.shields.io/badge/Flash%20in%20browser-FF6D00?logo=googlechrome&logoColor=white" alt="Flash in browser"></a>
-  <a href="https://makerworld.com/en/models/2907695-capsule-radar-live-flight-radar-desk-gadget"><img src="https://img.shields.io/badge/MakerWorld-3D%20case-1A8917?logo=bambulab&logoColor=white" alt="MakerWorld – 3D case"></a>
-  <img src="https://img.shields.io/badge/board-ESP32--S3%20round%20AMOLED-E7352C?logo=espressif&logoColor=white" alt="Board: ESP32-S3 round AMOLED">
-  <a href="https://github.com/socquique/capsule-radar/releases"><img src="https://img.shields.io/github/v/tag/socquique/capsule-radar?label=firmware&color=7B42BC" alt="Firmware version"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/code-MIT-2088FF" alt="License: MIT"></a>
-  <img src="https://img.shields.io/github/languages/count/socquique/capsule-radar?label=languages&color=FFC107" alt="Languages">
-  <a href="https://github.com/socquique/capsule-radar/stargazers"><img src="https://img.shields.io/github/stars/socquique/capsule-radar?style=social" alt="GitHub stars"></a>
-</p>
+A live **ADS-B aircraft radar** for the **Waveshare ESP32-S3-Knob-Touch-LCD-1.8**: a 1.8-inch round touchscreen with a rotary knob. It pulls nearby aircraft from free online feeds over WiFi and plots them on a radar scope centred on your location. Turn the knob to step through aircraft and airports, swipe between pages, and read the details on a card.
 
-<p align="center">
-  <img src="docs/img/device.JPG" width="330" alt="Capsule Radar — a live flight on the device">
-</p>
-<p align="center"><sub>A real flight on the device: callsign, type, altitude/speed, <b>route</b> (Lisbon → Abu Dhabi) and the <b>aircraft photo</b> — all looked up automatically.</sub></p>
+> **This repository is a homage to, and a derivative of, [Capsule Radar](https://github.com/socquique/capsule-radar) by Quique Tortosa ([@socquique](https://github.com/socquique)).** The idea, the radar scope, the feed client, the web configuration, the WiFi setup portal, the sweep compositor and the idle clock are his work; this fork only adapts them to a different device and adds to them. If you own one of the round AMOLED boards that his project targets, use **his** project, not this one. See [Credits](#credits-and-licence).
 
-A live **ADS-B aircraft radar** for the **Waveshare ESP32-S3-Touch-AMOLED-1.75** — a round 466×466 AMOLED with capacitive touch. It pulls nearby aircraft from a free online feed over WiFi and plots them on a touch radar scope centered on your location, with live flight details and selectable visual skins.
+It is deliberately **specific to one device**, the knob board. The pin map, panel, touch controller, haptics and every layout in this repo are tuned for its round 360 x 360 screen. It is not a general port, and it is not a replacement for the original.
 
-> Visual reference: open [`assets/plane_radar_2.0_mockup.html`](assets/plane_radar_2.0_mockup.html) in a browser.
+## Contents
 
-<p align="center"><img src="docs/img/radar.gif" width="360" alt="Capsule Radar live scope"></p>
+- [Credits and licence](#credits-and-licence)
+- [What is different from the original](#what-is-different-from-the-original)
+- [Hardware](#hardware)
+- [Using the device](#using-the-device)
+- [Deploying: build, flash, update](#deploying-build-flash-update)
+- [Regenerating the data tables](#regenerating-the-data-tables)
+- [Tuning reference](#tuning-reference)
+- [Repo layout](#repo-layout)
+- [Troubleshooting](#troubleshooting)
 
-| Phosphor | Orb | Amber CRT | Military |
-|:--:|:--:|:--:|:--:|
-| ![Phosphor](docs/img/radar.png) | ![Orb](docs/img/orb.png) | ![Amber](docs/img/amber.png) | ![Military](docs/img/military.png) |
+## Credits and licence
 
-<sub>Captured from the bundled desktop simulator (the device screen is round; the square corners are off-panel).</sub>
+**The original project.** Capsule Radar (formerly "Plane Radar 2.0") by **Quique Tortosa (@socquique)**: <https://github.com/socquique/capsule-radar>. It runs on the Waveshare ESP32-S3-Touch-AMOLED-1.75 and 1.43 boards and comes with a printable case on [MakerWorld](https://makerworld.com/en/models/2907695-capsule-radar-live-flight-radar-desk-gadget) and a browser flasher. Almost everything that makes this work is his: the streaming ADS-B client with per-provider pacing, the radar scope and its themes, route lookup, the configuration web page and WiFi portal, the QSPI sweep compositor, the idle clock, and the overall structure of the code.
 
-## Features
+**How this repo relates to it.** It started as a fork of that project at upstream commit `ecf2110` ("FW 1.6.0: idle clock, LCD 2.1 wake-only touch, 429 pacing", 2026-10-27) and keeps the original git history. Everything after that point is this fork's work. Bugs in the fork are the fork's, so please report them here and not upstream.
 
-- **Live traffic** from [airplanes.live](https://airplanes.live), [adsb.fi](https://adsb.fi/) and [adsb.lol](https://adsb.lol) (free, non-commercial), updated every couple of seconds. Each provider is paced independently, so one refusing or rate-limiting does not stop the feed. Memory-safe streaming parser with a hard aircraft cap. *Note: airplanes.live is now [contributor-only](https://airplanes.live/get-started/) — if you run one of their feeders, your radar uses their API automatically from the same network (no keys, nothing to configure); otherwise it quietly falls back to adsb.fi / adsb.lol.*
-- **Four themes** (long-press the screen to cycle, or pick on the web; remembered across reboots):
-  - **Phosphor** — green-on-black radar scope: rings, animated sweep, aircraft glyphs rotated by heading and color-coded by altitude, fading trails, emergency halo.
-  - **Orb** — green gradient + grid scope: the 7 nearest aircraft as yellow orbs emitting waves, off-range traffic as edge arrows pointing its way, orange target rings.
-  - **Amber CRT** and **Military** — the same scope retinted (warm amber / night-vision green).
-- **Touch** (CST9217): tap an aircraft → detail card (callsign, type, altitude, vertical speed, ground speed, distance, ground track (HDG), squawk, and **origin → destination** looked up from adsbdb, cached in NVS). The on-screen zoom button cycles the zoom range (10–100 km; the web page goes to 150 km). Swipe between **Radar / List / Stats** (circular layouts).
-- **Boot splash** + **alert pings** (ES8311 speaker): a soft ping when a new aircraft enters range, an urgent double-beep for emergency/military — volume & mute on the web page.
-- **Smooth motion**: aircraft glyphs glide between polls (interpolated) instead of jumping, using cheap partial redraws.
-- **Top HUD**: WiFi status (amber if the data feed is failing), in-range aircraft count, NTP/RTC clock, **battery %** (charging bolt, red when low), and the date. The Stats view footer shows how to reach the config page (`capsuleradar.local` + IP).
-- **Battery aware** (AXP2101): shows charge level, warns when low, and slows the feed poll rate on battery to save power.
-- **Real-time clock** (PCF85063): keeps the time/date across power loss, so the clock is right even before/without WiFi; re-synced from NTP when online.
-- **Smart brightness**: configurable idle auto-dim (no touch), and **face-down sleep** (QMI8658 IMU — flip it over to turn the screen off; a touch or turning it back up wakes it).
-- **Idle clock**: instead of dimming, the radar turns into an analog clock when nobody touches it — the sweep line spins onto the current second and becomes the second hand, the hour and minute hands grow out of the centre, N/E/S/W become 12/3/6/9, and the planes keep moving behind it, dimmed. A touch brings the radar back (that touch does nothing else), and so does an emergency squawk in range. The web page's "Clock or dim after" setting sets the wait; a web switch turns the clock off.
-- **GPS auto-location** (optional **-G** board variant): the Waveshare `-G` board has an onboard GPS (Quectel LC76G). Turn it on from the web page and the radar **sets its own center point automatically**, with an on-screen **satellite status icon** (amber while acquiring, green once it has a fix). Standard boards simply enter their location manually.
-- **Configuration web page** at `http://capsuleradar.local/` — center point (map picker), display range, theme, **time zone** (auto-detected from your browser), live brightness slider, sound, WiFi reset, and over-the-air firmware update. Settings persist in NVS.
-- **First-boot WiFi setup** via a captive portal (`CapsuleRadar-Setup`).
+**Licence.** MIT, copyright (c) 2026 Quique Tortosa (socquique), exactly as in [`LICENSE`](LICENSE). The notice stays with every copy; this fork's additions are offered under the same licence.
+
+**Data and third-party material.**
+
+| What | Source | Notes |
+|---|---|---|
+| Live aircraft | [airplanes.live](https://airplanes.live), [adsb.fi](https://adsb.fi), [adsb.lol](https://adsb.lol) | Free, non-commercial. Keep the polling polite. See [`docs/DATA_SOURCE.md`](docs/DATA_SOURCE.md) |
+| Routes | [adsbdb.com](https://www.adsbdb.com) | Origin to destination, cached on the device |
+| Weather radar | [RainViewer](https://www.rainviewer.com) | Rain radar frames |
+| Satellite clouds | [EUMETSAT EUMETView](https://view.eumetsat.int) (Meteosat) | Tested over Europe, where it works. Over Australia the service returned a black frame (no data there) |
+| Forecast | [Open-Meteo](https://open-meteo.com) | 3-day forecast |
+| Coastlines | [Natural Earth](https://www.naturalearthdata.com), public domain | Embedded as a table (`src/coastline_data.h`) |
+| Airports | [OurAirports](https://ourairports.com/data/), public domain | Embedded (`src/airports_data.h`, `src/airports_info.h`) |
+| Time zones | IANA time zone database | Baked into the airport table at generation time |
+| Panel start-up table | Waveshare's demo code | The values are **Waveshare's**. Their demo ships no licence file, so `src/boards/st77916_knob_init.h` is **not covered by this project's MIT licence**. It is committed only so the project builds without the demo, and can be regenerated with `bringup/gen_init.py` |
+
+This is an independent fork and is not affiliated with Waveshare.
+
+## What is different from the original
+
+The original targets 466 x 466 AMOLED boards with a PMIC, audio codec and IMU. This fork targets a 360 x 360 round LCD with a knob, and is built around that.
+
+- **The knob is the main control.** It steps through the radar's aircraft and airports clockwise by where they sit on the screen (with a "none" stop), scrolls the aircraft list one row per click, and flips the weather page between modes. Every step gives a haptic tick from the DRV2605L.
+- **Four pages**: Radar, aircraft List, Settings and Weather. The device always opens on the radar.
+- **Airports as first-class objects.** Bright magenta crosses on the scope, selectable by tap or knob, with an info card (IATA and ICAO codes, name, **local time using the airport's own time zone rules**, distance, bearing, elevation, country), and rows in the list with a building icon.
+- **A list that is a wheel**, with plane, jet, helicopter and building icons; the centre row is the selected item.
+- **The sweep makes things glow.** Aircraft and airports light up bright green as the radar line passes, rising over 300 ms and fading over 3 s.
+- **Smooth page changes.** A swipe slides a pre-rendered picture of the next page at about 40 frames a second, instead of redrawing the whole screen on every frame of a finger drag (which managed about 12).
+- **A Settings page** with a range dropdown, a "Military only" checkbox, WiFi signal strength and the config page address.
+- **Less clutter when it is busy.** With something selected, the other aircraft hide their flight code and altitude, once at least a chosen number of aircraft are on screen (a setting on the config page).
+- **Weather sized for the glass**: radar and cloud pictures at a 320 px circle, the satellite picture covering a true 75 km radius, a location line, and a 3-day forecast as the default.
+- **A build workflow for locked-down Windows machines**: everything compiles inside Docker, and only flashing runs on Windows. See [Deploying](#deploying-build-flash-update).
+- Compiled with `-O2` instead of the framework's default size optimisation. LVGL's software drawing is a large part of every frame, so this helps a little on some pages (a few milliseconds a frame); it is not a big win on its own.
 
 ## Hardware
 
-The reference board is the Waveshare **ESP32-S3-Touch-AMOLED-1.75**: ESP32-S3R8 (8 MB PSRAM, 16 MB flash), **CO5300** AMOLED over QSPI, **CST9217** touch, **QMI8658** IMU, **PCF85063** RTC, **AXP2101** PMIC, **ES8311** audio + speaker, microSD.
+**Waveshare ESP32-S3-Knob-Touch-LCD-1.8** ([wiki](https://www.waveshare.com/wiki/ESP32-S3-Knob-Touch-LCD-1.8)).
 
-The Waveshare **ESP32-S3-Touch-AMOLED-1.43** is also supported in-tree. Same SoC, same 466×466 CO5300 panel — but a completely different pin map, an **FT3168** touch controller, and no PMIC or audio codec (so no battery readout and no alert pings; everything else works).
+| | |
+|---|---|
+| MCU | **ESP32-S3R8** (8 MB octal PSRAM, 16 MB flash). The board also carries a **second MCU, an ESP32-U4WDH**, behind the same USB-C port |
+| Display | 1.8" round, 360 x 360, **ST77916** over QSPI. Backlight on GPIO 47 |
+| Touch | **CST816D**, I2C address `0x15` (SDA GPIO 11, SCL GPIO 12) |
+| Rotary knob | Two-pin encoder: GPIO 8 (A, clockwise = +1) and GPIO 7 (B), read by a 3 ms timer |
+| Haptics | **DRV2605L**, I2C address `0x5A`, tick effect 5 |
+| Battery | Sense on GPIO 1 (ADC behind a divide-by-two); shown only while USB is not connected |
+| Not used | GPS (the board has none), the DAC/audio, the TF card slot |
 
-| | 1.75 (reference) | 1.43 |
+All pins live in [`src/boards/board_knob_18.h`](src/boards/board_knob_18.h).
+
+> **The USB-C plug orientation selects which of the two MCUs you reach.** Flip the plug and you are talking to the other chip, usually on a different COM port. **Only ever flash the ESP32-S3.** `deploy.cmd` and esptool both tell you which chip they found; if it is not the S3, flip the plug.
+
+## Using the device
+
+**First boot.** Join the open WiFi network **`CapsuleRadar-Setup`** from your phone, pick your 2.4 GHz network (the S3 has no 5 GHz radio) and enter the password. Then browse to **`http://capsuleradar.local/`** (or the IP shown on the Settings page) to set your centre point, units, theme and the rest.
+
+**Pages.** Swipe left and right: Radar, List, Settings, Weather.
+
+| Page | Touch | Knob |
 |---|---|---|
-| PlatformIO env | `esp32-s3-amoled-175` | `esp32-s3-amoled-143` |
-| QSPI CS / SCLK / D0–D3 | 12 / 38 / 4,5,6,7 | 9 / 10 / 11,12,13,14 |
-| LCD reset | 39 | 21 |
-| I2C SDA / SCL | 15 / 14 | 47 / 48 |
-| Touch | CST9217 @ 0x5A | FT3168 @ 0x38 |
-| Battery / audio | AXP2101 / ES8311 | not fitted |
+| **Radar** | Tap an aircraft or airport to select it and show its card. Tap empty background: hides the card but keeps the selection; tap it again with no card showing to clear the selection | Steps the selection clockwise by position, through a "none" stop. The card returns after the knob has been still for 1.5 s |
+| **List** | The centre row is the selected item. Aircraft first (nearest first), then airports in range | One row per click |
+| **Settings** | **Range** dropdown (10, 20, 30, 50, 100, 150 km), **Theme** dropdown (Phosphor, Orb, Amber CRT, Military), **Military only** checkbox, WiFi signal bars and the config page address. The firmware version is not shown here: it is in the serial boot log and the config page footer | Not used |
+| **Weather** | Tap to change mode | Changes mode: WX RADAR, SAT CLOUDS, 3-DAY FORECAST |
 
-Pin maps live in [`src/boards/`](src/boards/), one header per board, selected by a `-DBOARD_*` build flag. They are taken from the vendor board definition and then **confirmed on hardware** — never guessed. Shared tunables stay in [`src/config.h`](src/config.h).
+**Idle.** After 60 s with no touch or knob the radar turns into an analog clock (changeable on the config page, "Clock or dim after"). The first touch or click only wakes it.
 
-### Waveshare ESP32-S3-Touch-LCD-2.1 (experimental)
+**Military only** is the same setting as the config page's. Switching it on filters what is already on screen at once. Switching it off has to fetch the other aircraft, so they appear within a few seconds. With it on and none in range, the scope still shows its map and airports, and the List says "No aircraft or airports in range".
 
-Contributed by @alexzogh in #45. **Experimental:** touch, WiFi, the feed and web updates work, but
-the picture can shift sideways now and then, more during a web update
-([#49](https://github.com/socquique/capsule-radar/issues/49)).
+**Airports** appear only when they are inside the current range, and only with "Show airports" on (the config page).
 
-The 2.1-inch board uses a 480×480 ST7701 RGB IPS panel, CST820 touch, and a
-TCA9554 GPIO expander. Its pin map and timings live in `src/boards/board_lcd_21.h`.
-It has no PMIC or audio codec; battery reporting and alert sounds are disabled.
+## Deploying: build, flash, update
 
-Build with `pio run -e esp32-s3-lcd-21`; upload over USB with `-t upload`, or use
-`pio run -e esp32-s3-lcd-21-ota -t upload` once connected to WiFi.
-Release assets include `CapsuleRadar-esp32s3-lcd21.bin` (merged USB image at 0x0)
-and `CapsuleRadar-ota-lcd21.bin` (app-only image for the device's web update page).
-The browser flasher currently supports the AMOLED boards.
+Everything is driven by five scripts in the project root. The build and merge run **inside Docker**; flashing runs **on Windows** through `esptool` in a small Python venv. This works on managed laptops that block PlatformIO's compiler, `pip.exe` and similar ("Access is denied"): the container is not subject to that policy.
 
-The LCD environment rebuilds ESP-IDF with IRAM-safe LCD/GDMA interrupts and octal
-PSRAM enabled for RGB refresh during WiFi flash operations. Its initial build takes
-longer than the AMOLED environments. The QSPI sweep compositor remains enabled on
-AMOLED; the RGB panel uses the shared LVGL sweep renderer.
+| Script | What it does |
+|---|---|
+| `settings.cmd` | Shared settings: the COM `PORT` (default `COM4`), the env names, the Docker image and volume names. Edit here only |
+| `build.cmd [env]` | Compiles in Docker. Deletes the previous `firmware.bin` first, so a failed build cannot be flashed by accident |
+| `merge.cmd [env]` | Merges bootloader, partition table, `boot_app0` and the app into one `merged.bin` for address `0x0` |
+| `deploy.cmd [--keep-wifi] [env]` | Flashes. Checks first that the image is for the knob and not stale |
+| `full_deploy.cmd [--keep-wifi] [env]` | Runs the steps above in order and stops at the first failure |
 
-### Where to buy the board
-
-The 1.75″ board is in a **global stock squeeze** right now (even Waveshare lists it on backorder), so availability moves week to week. The official store is the reference; the Amazon links are what is actually in stock as of this writing.
-
-| Board | Waveshare official (ships worldwide) | Amazon (affiliate links) |
-|---|---|---|
-| **1.75″ standard** — no case; the one the printed enclosure needs | [product page](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm) (backorder) | 🇺🇸 [.com](https://www.amazon.com/dp/B0F7XTJ1ZL?tag=capsuleradar-20) · 🇪🇸 [.es](https://www.amazon.es/dp/B0F7XTJ1ZL?tag=capsuleradar-21) · 🇩🇪 [.de](https://www.amazon.de/dp/B0F7XTJ1ZL?tag=capsulerada03-21) · 🇬🇧 [.co.uk](https://www.amazon.co.uk/dp/B0F7XTJ1ZL?tag=capsulerada0d-21) · 🇮🇹 [.it](https://www.amazon.it/dp/B0F7XTJ1ZL?tag=capsulerada08-21) · 🇫🇷 [.fr](https://www.amazon.fr/dp/B0F7XTJ1ZL?tag=capsulerada0e-21) · 🇯🇵 [.co.jp](https://www.amazon.co.jp/dp/B0F7XTJ1ZL?tag=capsuleradar-22) · 🇨🇦 [.ca](https://www.amazon.ca/dp/B0F7XTJ1ZL?tag=capsulerada09-20) — official Waveshare listing, restocking |
-| **1.75″ -G** — adds GPS (auto-location, heading-up) | same page, pick the **-G** option | 🇺🇸 [.com](https://www.amazon.com/dp/B0F7XWWMJW?tag=capsuleradar-20) · 🇪🇸 [.es](https://www.amazon.es/dp/B0F7XWWMJW?tag=capsuleradar-21) · 🇩🇪 [.de](https://www.amazon.de/dp/B0F7XWWMJW?tag=capsulerada03-21) · 🇬🇧 [.co.uk](https://www.amazon.co.uk/dp/B0F7XWWMJW?tag=capsulerada0d-21) · 🇮🇹 [.it](https://www.amazon.it/dp/B0F7XWWMJW?tag=capsulerada08-21) · 🇫🇷 [.fr](https://www.amazon.fr/dp/B0F7XWWMJW?tag=capsulerada0e-21) · 🇯🇵 [.co.jp](https://www.amazon.co.jp/dp/B0F7XWWMJW?tag=capsuleradar-22) · 🇨🇦 [.ca](https://www.amazon.ca/dp/B0F7XWWMJW?tag=capsulerada09-20) — official Waveshare listing, restocking · 🇺🇸 [third-party, in stock](https://www.amazon.com/dp/B0F8867487?tag=capsuleradar-20) |
-| **1.75″ -B** — the same board inside Waveshare's own case. Works, but you must open that case yourself and its shell is **not** the printed enclosure | same page, pick the **-B** option | 🇺🇸 [.com](https://www.amazon.com/dp/B0F7XTJ7JW?tag=capsuleradar-20) · 🇪🇸 [.es](https://www.amazon.es/dp/B0F7XTJ7JW?tag=capsuleradar-21) · 🇩🇪 [.de](https://www.amazon.de/dp/B0F7XTJ7JW?tag=capsulerada03-21) · 🇬🇧 [.co.uk](https://www.amazon.co.uk/dp/B0F7XTJ7JW?tag=capsulerada0d-21) · 🇮🇹 [.it](https://www.amazon.it/dp/B0F7XTJ7JW?tag=capsulerada08-21) · 🇫🇷 [.fr](https://www.amazon.fr/dp/B0F7XTJ7JW?tag=capsulerada0e-21) · 🇯🇵 [.co.jp](https://www.amazon.co.jp/dp/B0F7XTJ7JW?tag=capsuleradar-22) · 🇨🇦 [.ca](https://www.amazon.ca/dp/B0F7XTJ7JW?tag=capsulerada09-20) |
-| **1.43″** — the second supported board | [product page](https://www.waveshare.com/esp32-s3-touch-amoled-1.43.htm), pick **without case** | 🇪🇸 [.es](https://www.amazon.es/dp/B0DV3KM88S?tag=capsuleradar-21) · 🇩🇪 [.de](https://www.amazon.de/dp/B0DV3KM88S?tag=capsulerada03-21) · 🇬🇧 [.co.uk](https://www.amazon.co.uk/dp/B0DV3KM88S?tag=capsulerada0d-21) · 🇮🇹 [.it](https://www.amazon.it/dp/B0DV3KM88S?tag=capsulerada08-21) · 🇫🇷 [.fr](https://www.amazon.fr/dp/B0DV3KM88S?tag=capsulerada0e-21) · 🇯🇵 [.co.jp](https://www.amazon.co.jp/dp/B0DT9PSDW6?tag=capsuleradar-22) · 🇨🇦 [.ca](https://www.amazon.ca/dp/B0DT9PSDW6?tag=capsulerada09-20) — no US listing; use the Waveshare store there |
-| **Battery** (optional) — 3.7 V LiPo, 1100 mAh, protection board, JST/MX1.25 plug (the one I run myself) | — | 🇪🇸 [.es](https://www.amazon.es/dp/B0F1FGZQS5?tag=capsuleradar-21) · 🇺🇸 [.com](https://www.amazon.com/dp/B0F1FGZQS5?tag=capsuleradar-20) · 🇮🇹 [.it](https://www.amazon.it/dp/B0F1FGZQS5?tag=capsulerada08-21) · 🇫🇷 [.fr](https://www.amazon.fr/dp/B0F1FGZQS5?tag=capsulerada0e-21) (DE/UK: that exact pack is not listed — search for a *protected* 3.7 V LiPo, ~1100 mAh, size **102540**, 1.25 mm micro-JST plug) — ⚠️ check the plug's **polarity** against the board's markings before connecting; it is not standardised across vendors |
-| **Printed-parts hardware** — 6×2 mm disc magnets + M2×5 screws (counts per case variant on the MakerWorld page) | — | Magnets, the ones I used: 🇪🇸 [.es](https://www.amazon.es/dp/B0F4BZ447N?tag=capsuleradar-21) — elsewhere search "neodymium magnets 6x2mm": 🇺🇸 [.com](https://www.amazon.com/s?k=neodymium+magnets+6x2mm&tag=capsuleradar-20) · 🇩🇪 [.de](https://www.amazon.de/s?k=neodym+magnete+6x2mm&tag=capsulerada03-21) · 🇬🇧 [.co.uk](https://www.amazon.co.uk/s?k=neodymium+magnets+6x2mm&tag=capsulerada0d-21) · 🇮🇹 [.it](https://www.amazon.it/s?k=magneti+neodimio+6x2mm&tag=capsulerada08-21) · 🇫🇷 [.fr](https://www.amazon.fr/s?k=aimants+neodyme+6x2mm&tag=capsulerada0e-21) · 🇯🇵 [.co.jp](https://www.amazon.co.jp/s?k=neodymium+magnets+6x2mm&tag=capsuleradar-22) · 🇨🇦 [.ca](https://www.amazon.ca/s?k=neodymium+magnets+6x2mm&tag=capsulerada09-20). M2×5 screws: 🇪🇸 [.es](https://www.amazon.es/s?k=tornillos+M2x5&tag=capsuleradar-21) · 🇺🇸 [.com](https://www.amazon.com/s?k=M2x5+machine+screws&tag=capsuleradar-20) |
-
-> ⚠️ **Do not buy the “1.75C”** (`ESP32-S3-Touch-AMOLED-1.75C`, aluminum case): despite the name it is a **different board** and this firmware does not run on it.
-
-<sub>The Amazon links are affiliate links — as an Amazon Associate I earn from qualifying purchases, at no extra cost to you. The Waveshare links are plain links.</sub>
-
-## Build & flash (PlatformIO)
-
-```bash
-pio run -e esp32-s3-amoled-175 -t upload     # build + flash over USB-C (1.75)
-pio run -e esp32-s3-amoled-143 -t upload     # ...or the 1.43
-pio device monitor -b 115200                  # serial log
-```
-The boot log names the board it was built for (`Capsule Radar boot  fw … board …`) — worth checking first if the screen stays black, since the wrong board's image drives the wrong pins.
-On first flash you may need to hold **BOOT** then tap **RESET**. After flashing, on first boot connect your phone to the **`CapsuleRadar-Setup`** WiFi and enter your home network — real aircraft appear within seconds.
-
-## Building on a locked-down Windows machine (Docker)
-
-*Fork-specific.* Some managed Windows laptops block unsigned executables, so PlatformIO's GCC, `pip.exe` and the VS Code PlatformIO installer fail with "Access is denied". The workaround: compile inside a Linux container, where that policy doesn't apply, and run only the flashing on Windows (esptool is pure Python, run through the signed `python.exe`). If your machine has no such restriction, skip this section and use `pio run -e <env> -t upload` as above.
-
-> **Status:** the knob env (`esp32-s3-knob-18`, set as `KNOB_ENV` in `settings.cmd`) is **not in `platformio.ini` yet**; it arrives with the port. Until then, `build.cmd` and `merge.cmd` accept any existing env as an argument (for example `.\build.cmd esp32-s3-amoled-175`), which is how to test the toolchain. `deploy.cmd` refuses to flash anything that wasn't built for `KNOB_ENV`.
+The default env is `esp32-s3-knob-18` (the radar firmware). The other env, `esp32-s3-knob-18-bringup`, is a standalone hardware test, see [bring-up](#bring-up-the-hardware-test).
 
 ### Prerequisites
 
-1. **Docker Desktop**, running. `docker --version` and `docker info` must both work.
-2. **Python 3.12** on PATH. Check: `python --version`
-3. A USB-C **data** cable (charge-only cables show no COM port).
-4. A 2.4 GHz WiFi network for the device. The ESP32-S3 has no 5 GHz radio.
+1. **Windows**, **PowerShell** and **git**.
+2. **Docker Desktop**, **running** (`docker info` must work). The first build needs internet to download the image, the PlatformIO platform and the libraries.
+3. **Python 3.12** on PATH (`python --version`).
+4. A USB-C **data** cable (a charge-only cable shows no COM port).
+5. **Waveshare's demo code**, only if you want to regenerate the display table or build the bring-up firmware (from the Resources section of the [wiki page](https://www.waveshare.com/wiki/ESP32-S3-Knob-Touch-LCD-1.8)). The radar firmware builds without it.
 
-### One-time setup
+### One-time setup on a new machine
 
-1. Create a Python environment for esptool. Use `python -m`, not `pip.exe`, which is blocked on managed laptops:
+Run these from PowerShell.
+
+1. **Get the code.**
+
+   ```
+   git clone https://github.com/nickraphael/capsule-radar-knob.git
+   cd capsule-radar-knob
+   ```
+
+2. **Create the flashing environment** (esptool, pure Python). Use `python -m`, not `pip.exe`, which managed laptops block:
 
    ```
    python -m venv .venv
    .venv\Scripts\python.exe -m pip install esptool
    ```
 
-2. Edit `settings.cmd`: set `PORT` to your COM port (Device Manager > Ports), and check `KNOB_ENV`.
-
-3. **The board has two MCUs (ESP32-S3 and ESP32-U4) behind one USB-C port, and the plug orientation selects which one you reach.** Confirm you are talking to the S3 (read-only, writes nothing):
+3. **(Optional) Regenerate the display start-up table.** It is already in the repo (`src/boards/st77916_knob_init.h`: Waveshare's panel register values, kept so a fresh clone builds without their demo; see the [credits](#credits-and-licence) for the licence note), so you can skip this for the radar firmware. You only need the demo to refresh that file, or to make the copy the bring-up firmware needs. Point the generator at `lcd_bsp.c` inside the demo:
 
    ```
-   .venv\Scripts\python.exe -m esptool --chip esp32s3 --port COM3 flash-id
+   python bringup/gen_init.py "<demo folder>\Arduino\examples\08_LVGL_Test\lcd_bsp.c" src/boards/st77916_knob_init.h
    ```
 
-   Expect "ESP32-S3" and a 16 MB flash. If the port isn't found, or esptool reports a different chip, unplug, flip the plug 180 degrees and try again. Only ever flash the S3.
-
-4. **Back up the factory firmware before the first flash** (the S3's 16 MB, about a minute):
+   For the bring-up test firmware, run it with no output path, which writes that firmware's own copy, `bringup/st77916_knob_init.h` (this copy is git-ignored):
 
    ```
-   .venv\Scripts\python.exe -m esptool --chip esp32s3 --port COM3 read-flash 0 0x1000000 factory_backup_s3.bin
+   python bringup/gen_init.py "<demo folder>\Arduino\examples\08_LVGL_Test\lcd_bsp.c"
    ```
 
-   Restore with `write-flash 0x0 factory_backup_s3.bin`. `*.bin` is git-ignored; keep a copy outside the project folder too. Waveshare also publishes the factory BIN files (see the wiki's Resources section), which restore both chips.
+4. **Set your COM port** in `settings.cmd` (Device Manager, Ports; the knob appears as "USB Serial Device"). To override it for one session without editing the file: `$env:PORT = "COM5"`.
 
-### Build, merge, flash
+5. **Confirm you are talking to the ESP32-S3.** This only reads; it writes nothing:
 
-With Docker running, from PowerShell in the project folder, in order:
+   ```
+   .venv\Scripts\python.exe -m esptool --chip esp32s3 --port COM4 flash-id
+   ```
+
+   Expect "ESP32-S3" and a 16 MB flash. If the port is missing or it reports another chip, flip the USB-C plug 180 degrees and retry.
+
+6. **Back up the factory firmware** before the first flash (about a minute):
+
+   ```
+   .venv\Scripts\python.exe -m esptool --chip esp32s3 --port COM4 read-flash 0 0x1000000 factory_backup_s3.bin
+   ```
+
+   Keep a copy outside the project too (`*.bin` is git-ignored). To restore it:
+
+   ```
+   .venv\Scripts\python.exe -m esptool --chip esp32s3 --port COM4 write-flash 0x0 factory_backup_s3.bin
+   ```
+
+### First flash
+
+A first flash writes the whole chip. **This erases the saved WiFi and settings.**
 
 ```
 .\build.cmd
@@ -161,110 +179,162 @@ With Docker running, from PowerShell in the project folder, in order:
 .\deploy.cmd
 ```
 
-Or run all three with `.\full_deploy.cmd`; it stops at the first step that fails. Each script also stops with a message if the step before it failed.
+or all three at once:
 
-- **`build.cmd`** compiles in a container. The first run is slow: it builds a small image from `Dockerfile` (Python, git, PlatformIO, esptool), then downloads the platform, toolchain and libraries. The toolchain lives in the `pio_cache_knob` Docker volume; libraries and build output live in `pio_work_knob`, because scanning thousands of library files across the Windows bind mount makes builds very slow. Only the three images needed for merging are copied back to `.pio/build/<env>/`. Check the output ends in `BUILD OK`. Force a clean rebuild with `docker volume rm pio_work_knob`.
-- **`merge.cmd`** merges bootloader, partition table, `boot_app0` and the app into one `merged.bin` flashed at `0x0`, and records which env it came from.
-- **`deploy.cmd`** refuses to flash if `merged.bin` is older than `firmware.bin` or wasn't built for `KNOB_ENV`, then flashes the S3. **This overwrites everything on it, including the saved WiFi credentials and settings** (location, theme, units), so you redo the WiFi setup afterwards. Close any serial monitor first.
+```
+.\full_deploy.cmd
+```
 
-#### Keeping WiFi and settings: `--keep-wifi`
+Check that the build ends in **`BUILD OK`**. The first build is slow (several minutes) while Docker builds the image and downloads the toolchain. Later builds reuse the caches. Close any serial monitor first, then power-cycle the board after the flash and do the [first-boot setup](#using-the-device).
 
-The full image also rewrites the settings area. For everyday iteration, flash only the app instead:
+### Everyday update (keeps your WiFi and settings)
 
 ```
 .\build.cmd
 .\deploy.cmd --keep-wifi
 ```
 
-or in one go, `.\full_deploy.cmd --keep-wifi` (build, then flash the app; there is no merge step). It writes just `firmware.bin` at `0x10000` (the app0 slot), so the WiFi credentials, location and other saved settings survive. Both scripts also take an env name (`.\deploy.cmd --keep-wifi esp32-s3-knob-18-bringup`). `build.cmd` accepts the flag but ignores it with a note: compiling cannot touch settings, only flashing can.
+or `.\full_deploy.cmd --keep-wifi` for both. This flashes **only the app** (`firmware.bin` at `0x10000`), so the WiFi credentials, location and other saved settings survive; there is no merge step. Two limits:
 
-It carries the same wrong-board guard (only the knob envs), and `build.cmd` deletes the previous `firmware.bin` before building, so a failed build leaves nothing to flash by mistake. Two limits: the board must already carry a full image of this layout, so **do a plain `deploy.cmd` the first time**, and **again after any browser OTA update** (an app-only flash does not reset which OTA slot the bootloader picks).
+- The board must already carry a full image of this layout, so do the [first flash](#first-flash) once.
+- Do a plain `deploy.cmd` **again after any browser OTA update**, because an app-only flash does not reset which OTA slot the bootloader picks.
 
-If flashing can't connect: flip the USB-C plug 180 degrees. Still failing: hold the S3's BOOT button, power the board on again, release, and run `deploy.cmd` again. After a successful flash, power-cycle the board; on first boot join the `CapsuleRadar-Setup` WiFi as usual.
+### Updating over WiFi instead of USB
 
-The scripts are plain `.cmd` files, so PowerShell execution policy doesn't affect them (`deploy.cmd` uses one inline `powershell -Command` for the timestamp check, which isn't a script file).
+Browse to `http://capsuleradar.local/update` and upload **`.pio\build\esp32-s3-knob-18\firmware.bin`** (the app image, not `merged.bin`). The page's own wording mentions the upstream project's release file; ignore that.
 
-> The most common mistake is flashing a stale `merged.bin` because the build or merge was skipped or failed. `deploy.cmd` guards against the obvious case, but still check the build ended in `BUILD OK`.
+### What the Docker setup is
 
-### Assumptions to verify on the first real knob build
+- **Image `capsule-knob-build`**: Python 3.12, git, PlatformIO and esptool, built once from [`Dockerfile`](Dockerfile) by `build.cmd`. apt is switched to HTTPS because some networks tamper with plain HTTP.
+- **Volume `pio_cache_knob`**: the PlatformIO toolchain and platform (`/root/.platformio`).
+- **Volume `pio_work_knob`**: libraries and build output (`/pio_work`). They live in a volume, not the Windows folder, because scanning thousands of library files across the Windows mount makes builds very slow. Only `firmware.bin`, `bootloader.bin` and `partitions.bin` are copied back to `.pio\build\<env>\`.
+- Neither volume is shared with other projects, so a clean rebuild here never wipes theirs.
 
-- `scripts/docker_merge.sh` keeps the flash mode, frequency and size from the bootloader the build produced (DIO, 80 MHz, 16 MB), even though `platformio.ini` says `flash_mode = qio`: PlatformIO's espressif32 builder maps `qio` to `dio` for the image header and uploads with `--flash_mode dio`, and upstream's `scripts/build_webflasher.sh` merges with `dio` too. Checked on the 1.75 build: `merged.bin` header reads DIO / 80m / 16MB.
-- It also assumes the `default_16MB.csv` layout (otadata `0xe000`, app `0x10000`). A different partition file needs different offsets.
-- `boot_app0.bin` is located by searching the PlatformIO package cache rather than hardcoded. Verified against the pioarduino platform: it resolves to `/root/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin`.
-- The upstream flags assume native USB CDC for serial. How the knob routes USB to the S3 (UART bridge or native) is unconfirmed; check the schematic before relying on serial output.
+To reset:
 
-### Troubleshooting
-
-| Symptom | Cause / fix |
-|---|---|
-| `docker: error during connect ... dockerDesktopLinuxEngine` | Docker Desktop isn't running. Start it, wait for the engine, check `docker info` |
-| Build fails fetching a library from GitHub | The build image needs `git`; the `Dockerfile` installs it. If you made your own image, add git |
-| Image build fails: apt "Clearsigned file isn't valid, got 'NOSPLIT'" or "does the network require authentication?" | The network intercepts plain HTTP (port 80). The `Dockerfile` switches apt to HTTPS for this reason; keep that line |
-| Build tries to compile every env / the SDL simulator | Something ran `pio run` without `-e`. Always go through `build.cmd` |
-| Build is slow at "Scanning dependencies" | Libraries must live in the `pio_work_knob` volume, not the Windows folder (`build.cmd` does this) |
-| `deploy.cmd`: "Refusing to flash" | `merged.bin` was built for a different env than `KNOB_ENV`. Rebuild and re-merge the knob env |
-| esptool "Failed to connect", or no COM port | Flip the USB-C plug, close serial monitors, or use the BOOT method above |
-| esptool says the chip isn't ESP32-S3 | You're connected to the ESP32-U4. Flip the plug |
-| `pip.exe` / `gcc.exe` "Access is denied" | Managed-laptop policy; this Docker workflow is the way around it |
-
-## Flash from your browser (no toolchain)
-
-Makers can flash without installing anything using **ESP Web Tools** (Chrome or Edge on desktop):
-
-1. Open the **[web flasher](https://socquique.github.io/capsule-radar/)** (the project's GitHub Pages site).
-2. **Pick your board** (1.75″ or 1.43″) — the wrong image boots with a black screen.
-3. Plug the board in with a USB-C **data** cable and click **Install**.
-
-The flasher is built and published automatically by GitHub Actions ([`.github/workflows/webflasher.yml`](.github/workflows/webflasher.yml)) on every push to `main` — enable it once in **Settings → Pages → Source = GitHub Actions**. Tagged releases (`git tag v1.0.0 && git push origin v1.0.0`) also attach a ready-to-flash `CapsuleRadar-esp32s3.bin` to a **GitHub Release** via [`release.yml`](.github/workflows/release.yml). To preview the flasher locally:
-
-```bash
-./scripts/build_webflasher.sh                      # build + merge into web/flash/
-python3 -m http.server -d web/flash 8000           # serve (Web Serial works on localhost)
-# open http://localhost:8000
+```
+docker volume rm pio_work_knob      # forces a clean rebuild of the libraries and the project
+docker volume rm pio_cache_knob     # also re-downloads the toolchain
+docker rmi capsule-knob-build       # rebuilds the image (picks up newer PlatformIO / esptool)
 ```
 
-## Desktop simulator
+### Checking you have not broken the shared code
 
-The whole UI is portable LVGL and runs on your computer (SDL2) — great for iterating without hardware:
-```bash
-pio run -e native -t exec     # opens a 466×466 window (needs SDL2: `brew install sdl2`)
+The AMOLED envs are still in `platformio.ini`, and much of `src/` is shared with them. This fork does not support those boards and has not tested them on hardware, but it keeps them compiling as a regression check:
+
 ```
-Mouse = touch · `T` = switch theme · close the window to quit.
+.\build.cmd esp32-s3-amoled-175
+.\build.cmd esp32-s3-amoled-143
+```
 
-## Configuration
+`deploy.cmd` refuses to flash anything not built for the knob. The `esp32-s3-lcd-21` env is slow to build and is not part of the routine check. The `native` desktop-simulator env is inherited and has not been maintained by this fork.
 
-Browse to `http://capsuleradar.local/` (or the device IP) on the same WiFi to set the **center lat/lon**, **display range**, **theme** and **brightness**, or to **reset WiFi**. Saving restarts the device to apply.
+### Reading the serial log
+
+`pyserial` is installed with esptool. Opening a port can reset some boards, so switch DTR and RTS off:
+
+```
+.venv\Scripts\python.exe -m serial.tools.miniterm --dtr 0 --rts 0 COM4 115200
+```
+
+Quit with Ctrl+]. The log shows what hardware answered at start-up (`[display]`, `[touch]`, `[knob]`, `[haptic]`), then the feed, weather and clock activity.
+
+### Bring-up (the hardware test)
+
+`esp32-s3-knob-18-bringup` builds `bringup/main.cpp`, a standalone program with no radar code that tests the panel, touch, knob, haptics and memory settings. It needs `bringup/st77916_knob_init.h` (setup step 3). It goes through the same scripts:
+
+```
+.\build.cmd esp32-s3-knob-18-bringup
+.\merge.cmd esp32-s3-knob-18-bringup
+.\deploy.cmd
+```
+
+## Regenerating the data tables
+
+Both tables are generated, committed, and normally never touched. Regenerate them only to refresh the data.
+
+**Coastlines** (`src/coastline_data.h`), from the Natural Earth 1:10m coastline GeoJSON:
+
+```
+python tools/gen_coastline.py ne_10m_coastline.geojson src/coastline_data.h
+```
+
+**Airports** (`src/airports_data.h` and `src/airports_info.h`), from OurAirports. The two files are generated together because index *i* must mean the same airport in both:
+
+```
+python tools/gen_airports.py airports.csv src/airports_data.h src/airports_info.h
+```
+
+Download `airports.csv` from <https://davidmegginson.github.io/ourairports-data/airports.csv>. Without the third argument only `airports_data.h` is written. The third argument also needs the time zone lookup, installed into a throwaway venv, not the flashing one:
+
+```
+python -m venv tzvenv
+tzvenv\Scripts\python.exe -m pip install --only-binary :all: "timezonefinder<6.2" "h3<4" numpy tzdata
+```
+
+(The pins matter: newer `timezonefinder` needs a C compiler to install, and the older one needs the older `h3` API.) On a managed laptop, create that venv in an ordinary folder rather than `%TEMP%`: policy there can refuse to load compiled libraries from the temp folder. The airports' local-time rules are fixed at generation time, so regenerate now and then, since countries change their clocks.
+
+## Tuning reference
+
+Behaviour is set by macros in [`src/boards/board_knob_18.h`](src/boards/board_knob_18.h), each commented in the file. Change one, rebuild and flash.
+
+| Macro | Value | What it does |
+|---|---|---|
+| `BOOT_VIEW` | `0` | Page shown at start (0 radar, 1 list, 2 settings, 3 weather) |
+| `IDLE_DIM_MS` | `60000` | Idle time before the clock; a value saved from the config page wins |
+| `KNOB_CARD_DELAY_MS` | `1500` | How long the knob must be still before the info card returns |
+| `SWIPE_SLIDE`, `SWIPE_SLIDE_MS` | `1`, `280` | The pre-rendered page slide, and its duration. Delete `SWIPE_SLIDE` to go back to a plain finger drag |
+| `TOUCH_SCROLL_LIMIT` | `16` | How far (px) a finger may drift and still count as a tap (LVGL's default is 10) |
+| `AIRPORT_SELECT` | `1` | Airport crosses, selection, info card and list rows |
+| `SWEEP_GLOW`, `GLOW_RISE_MS`, `GLOW_FADE_MS`, `GLOW_LEVELS` | `1`, `300`, `3000`, `16` | The glow as the sweep passes |
+| `LABELS_SELECTED_ONLY` | `1` | Other aircraft hide their text while one is selected (threshold on the config page) |
+| `SETTINGS_PAGE`, `RANGE_ON_STATS`, `WIFI_BARS_ON_STATS` | `1` | The Settings page, with the range dropdown and the WiFi bars on it |
+| `WX_VIEW_D` | `320` | Diameter (px) of the weather pictures; at most 360 |
+| `CLOUD_RADIUS_KM` | `75` | Radius the satellite picture covers |
+| `STATS_*_Y` | | Vertical positions of the Settings page's rows |
+
+The zoom steps are `RANGE_STEPS_KM` in [`src/config.h`](src/config.h) (10, 20, 30, 50, 100, 150 for the knob). Everything else (centre point, theme, units, max aircraft, show airports, military only, the aircraft-text threshold, WiFi reset) is on the config page at `http://capsuleradar.local/` and is saved on the device.
 
 ## Repo layout
 
 ```
 src/
-  config.h           pins + tunables (Dénia, Spain by default)
-  main.cpp           tasks, WiFi/NTP, web config, brightness/IMU glue
-  display.*          CO5300 (Arduino_GFX) + LVGL bring-up
-  radar_view.*       the radar scope, aircraft, themes
-  ui.*               views (radar/list/stats) + detail card + HUD
-  touch_cst9217.*    capacitive touch driver
-  imu_qmi8658.*      accelerometer (face-down sleep)
-  battery.*          AXP2101 battery gauge
-  rtc_pcf85063.*     PCF85063 real-time clock
-  adsb_client.*      airplanes.live / adsb.fi / adsb.lol fetch + parse (with adsb_pacing.h)
-  route*.* route.*   origin→destination lookup (adsbdb)
-  sim_main.cpp       native SDL simulator (not flashed)
-include/lv_conf.h    LVGL config (v8)
-web/flash/           browser web-flasher (ESP Web Tools) for makers
-scripts/             build_webflasher.sh (merge firmware -> single .bin)
-docs/                hardware / data-source / architecture notes
+  main.cpp               tasks, WiFi and NTP, the web config page, the knob loop
+  boards/board_knob_18.h pins, panel and every knob-specific setting (see the table above)
+  display.*              ST77916 (Arduino_GFX) + LVGL, the sweep compositor, the page slide
+  radar_view.*           the scope: aircraft, airports, selection, themes, the glow
+  ui.*                   the four pages, the info cards, the list wheel, the Settings controls
+  knob.*  haptic.*       rotary knob decoder and the DRV2605L
+  touch_cst816d.cpp      touch controller driver
+  airports*.*  posix_tz.h  airport markers and details, and local time for any time zone
+  adsb_client.*  adsb_pacing.h   feed fetch and parse (inherited)
+  route*.*  photo*.*     route and aircraft photo lookup (inherited)
+  weather*.*  wx_radar*.*  cloud_image*.*   forecast, rain radar and satellite pictures
+  coastline*.*           coastline overlay
+bringup/                 standalone hardware test, and gen_init.py (the display table generator)
+tools/                   gen_airports.py, gen_coastline.py
+scripts/                 docker_build.sh, docker_merge.sh (run inside the container)
+tests/                   host-side unit tests, inherited from upstream (not re-run by this fork)
+docs/                    the original project's notes, written for the AMOLED boards
+build.cmd  merge.cmd  deploy.cmd  full_deploy.cmd  settings.cmd  Dockerfile
+include/lv_conf.h        LVGL configuration (v8)
 ```
 
-## Community ports & forks
+`.github/workflows/` and `web/flash/` are inherited from the original project (its AMOLED browser flasher and release builds). They are not used for the knob.
 
-The reference board is the **Waveshare ESP32-S3-Touch-AMOLED-1.75**, but other boards are welcome upstream: a port contributed as a pull request (its own PlatformIO env + board header in [`src/boards/`](src/boards/)) gets built by the CI on every release alongside the 1.75 — the in-tree **1.43** port is the worked example to copy, and the **2.1"** port by @alexzogh is now in-tree too (experimental, above). Ports that prefer to stay independent live as forks, linked here (MIT: fork away, and tell me so I can add yours).
+## Troubleshooting
 
-- **[Capsule Radar for the Waveshare ESP32-S3-Touch-LCD-2.1](https://github.com/alexzogh/capsule-radar/tree/port/esp32-s3-lcd-21)** by **@alexzogh (STLWarehouse)** — a full port to the 2.1" round LCD (ST7701), plus new features: **double-tap to track an aircraft** (scope re-centres on it), a **clock face on idle**, and the busy-airspace **query-radius fix** now merged back into this firmware. The board itself is now built in-tree with every release (files with `lcd21` in the name); the fork keeps its extra features.
-- **[Capsule Radar for the Waveshare 2.8" (non-touch)](https://github.com/ijord/capsule-radar)** by **@ijord** — port to the 2.8" ST7701 panel, with a smoother sweep compositor and the **PNG heap-corruption fix** that shipped upstream in v1.3.28. Thank you!
-- **[Skyglass](https://github.com/SilentWolf75/skyglass)** by **@SilentWolf75** — an independently evolved sibling (190+ commits): **shaded OpenStreetMap basemap rendered on-device** and **ESP32-P4** support.
-
-## Data & license
-
-**Firmware / code: [MIT](LICENSE)** — fork and build on it freely (keep the notice). Aircraft data: **airplanes.live** (free, **non-commercial / educational** — exactly this project; be polite with request cadence). Routes: **adsbdb.com** (free). Personal/hobby project. The 3D-printed enclosure is published on [MakerWorld](https://makerworld.com/en/models/2907695-capsule-radar-live-flight-radar-desk-gadget) (enclosure + this firmware).
+| Symptom | Cause and fix |
+|---|---|
+| Bring-up build fails with a missing `st77916_knob_init.h` | The bring-up firmware's own copy is git-ignored and was never generated here: run [setup step 3](#one-time-setup-on-a-new-machine) with no output path. (The radar firmware does not need this; its copy is in the repo) |
+| `docker: error during connect ... dockerDesktopLinuxEngine` | Docker Desktop is not running. Start it and wait for `docker info` to work |
+| Image build fails: apt "Clearsigned file isn't valid" | The network intercepts plain HTTP. The `Dockerfile` already switches apt to HTTPS; keep that line |
+| Build tries to compile every env, including the SDL simulator | Something ran `pio run` without `-e`. Always go through `build.cmd` |
+| Build is very slow at "Scanning dependencies" | Libraries must live in the `pio_work_knob` volume, not the Windows folder (`build.cmd` does this) |
+| `deploy.cmd`: "Refusing to flash" | `merged.bin` was built for another env, or is older than `firmware.bin`. Rebuild and re-merge |
+| esptool "Failed to connect", or no COM port | Close serial monitors. Flip the USB-C plug 180 degrees. Still failing: hold the S3's BOOT button, power the board on again, release, run again |
+| esptool says the chip is not an ESP32-S3 | You are connected to the ESP32-U4. Flip the plug |
+| `--keep-wifi` flash boots the wrong image | You flashed after a browser update without a full flash since: do a plain `deploy.cmd` |
+| `pip.exe` / `gcc.exe` "Access is denied" | Managed-laptop policy. This Docker workflow is the way around it |
+| Satellite picture is black | EUMETSAT has no data for your area (for example Australia). Rain radar and forecast still work |
+| The screen stays black after flashing | Check the boot log (above) first; then power-cycle. Make sure you flashed the S3, not the U4 |
