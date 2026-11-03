@@ -98,6 +98,9 @@ void setAirportsEnabled(bool on);                // show/hide airport markers on
 bool airportsEnabled();
 void setTrailLength(int level);                  // 0=off 1=short 2=medium 3=long (aircraft trails + flow)
 void setMaxOnScreen(int n);                       // how many (nearest) aircraft to draw on the scope
+// Boards that define LABELS_SELECTED_ONLY: selecting an aircraft hides the OTHER aircraft's code and altitude,
+// but only once at least n aircraft are on screen; with fewer, everyone keeps their text. 0 = always hide.
+void setLabelHideMin(int n);
 void setLargeText(bool on);                       // accessibility: bigger glyph labels. Call BEFORE init()
 void setUnits(int preset);                       // 0 = feet · 1 = metres (scope altitude labels; same presets as ui_set_units)
 

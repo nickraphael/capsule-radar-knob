@@ -25,6 +25,11 @@ void ui_set_feed_source(const char *host);  // Stats "Feed" line: which ADS-B pr
 void ui_set_gps(int state, int sats, float altM);   // GPS indicator: state 0=off/hidden 1=acquiring 2=fix; HUD icon + Stats line (altM = GPS altitude, NAN if unknown)
 void ui_splash_show(void);  // branded boot splash (auto-fades, covers init time)
 void ui_set_range_cb(void (*cb)(float km));  // on-screen zoom button -> notify main
+// The "Military only" checkbox on the Settings page (boards that define SETTINGS_PAGE; no-ops elsewhere). It is the
+// same setting as the config page's: main hears of a tap through the callback, and calls ui_set_military_only()
+// at boot and whenever the web page changes it, so the checkbox always shows the real state.
+void ui_set_military_cb(void (*cb)(bool on));
+void ui_set_military_only(bool on);
 void ui_set_range_km(float km);              // update the zoom button label / sync the cycle
 void ui_set_units(int preset);               // 0 = Aviation (ft,kt,km) · 1 = Metric (m,km/h,km) · 2 = Imperial (ft,mph,mi)
 void ui_set_large_text(bool on);             // accessibility: bigger fonts everywhere. Call BEFORE ui_create()

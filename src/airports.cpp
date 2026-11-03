@@ -207,6 +207,13 @@ bool airports_visible_info(int k, APInfo *out) {
     return true;
 }
 
+bool airports_visible_mark(int k, lv_point_t *pt, bool *large) {
+    if (k < 0 || k >= (int)s_apts.size()) return false;
+    *pt = s_apts[k].pos;
+    *large = s_apts[k].large != 0;
+    return true;
+}
+
 bool airports_info_by_index(int idx, APInfo *out) {
     for (const Apt &a : s_apts)
         if (a.idx == idx) { ap_fill(a, out); return true; }

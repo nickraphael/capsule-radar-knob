@@ -43,9 +43,20 @@ static bool get_jpeg(const char *url, uint8_t **out, size_t *outLen) {
 
 bool cloud_image_fetch(double lat, double lon) {
     if (WiFi.status() != WL_CONNECTED || !cloud_image_back_buffer()) return false;
-    // A roughly 440 x 440 km aviation-context window around the configured position.
+#if defined(CLOUD_RADIUS_KM)
+    // A true circle of CLOUD_RADIUS_KM around the position: the same number of kilometres per pixel both ways, so
+    // the rings drawn over the picture are real circles. A degree of longitude gets shorter with latitude (a
+    // degree is about 111 km north-south, but only 111 km x cos(latitude) east-west), so the longitude span is
+    // widened by 1 / cos(latitude).
+    const double latSpan = (double)CLOUD_RADIUS_KM / 111.195;
+    const double cosLat = fmax(0.05, cos(lat * 3.14159265358979 / 180.0));
+    const double lonSpan = latSpan / cosLat;
+#else
+    // A roughly 440 x 440 km aviation-context window around the configured position. (Only roughly: the box is
+    // a fixed +-2 x +-3 degrees, which is that size near 48 N and squashed or stretched elsewhere.)
     const double latSpan = 2.0;
     const double lonSpan = 3.0;
+#endif
     char url[720];
     snprintf(url, sizeof(url),
         "https://view.eumetsat.int/geoserver/wms?service=WMS&version=1.1.1&request=GetMap"

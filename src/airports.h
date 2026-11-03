@@ -43,6 +43,7 @@ struct APInfo {
 
 int  airports_visible_count(void);                       // how many are inside the scope
 bool airports_visible_info(int k, APInfo *out);          // the k-th of them, nearest first
+bool airports_visible_mark(int k, lv_point_t *pt, bool *large);   // just where the k-th sits and its size: cheap, for per-tick use
 bool airports_info_by_index(int idx, APInfo *out);       // by table index; false unless it is inside the scope
 bool airports_pos(int idx, lv_point_t *pt);              // its screen position, if it is inside the scope
 int  airports_hit(int x, int y, int radiusPx);           // table index of the one nearest (x,y) within radiusPx, or -1

@@ -917,6 +917,12 @@ bool begin() {
         lv_indev_drv_init(&s_indev_drv);
         s_indev_drv.type = LV_INDEV_TYPE_POINTER;
         s_indev_drv.read_cb = touch_read_cb;
+#if defined(TOUCH_SCROLL_LIMIT)
+    // How far (px) a finger may drift between touching and lifting and still count as a TAP. Past this LVGL takes it
+    // for the start of a swipe: a tap on a button then does nothing (a dropdown stays shut) and, here, the page can
+    // slide instead. LVGL's own default is 10; a fingertip on a small screen rolls more than that.
+    s_indev_drv.scroll_limit = TOUCH_SCROLL_LIMIT;
+#endif
         lv_indev_drv_register(&s_indev_drv);
         s_touchOk = true;
         Serial.println("[display] touch registered (" BOARD_NAME ")");

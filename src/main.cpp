@@ -84,6 +84,7 @@ static int                   g_rotation = 0;                         // clockwis
 static bool                  g_useGps = false;                       // auto-set home from the LC76G GPS (-G variant) (web/NVS)
 static int                   g_trailLen = 2;                         // aircraft trails 0=off 1=short 2=med 3=long (web/NVS)
 static int                   g_maxAc = 20;                           // max aircraft drawn on the scope (web/NVS)
+static int                   g_labelHideMin = 10;                    // below this many aircraft on screen, selecting one does not hide the others' code/altitude; 0 = always hide (web/NVS)
 static bool                  g_bigText = false;                      // accessibility: large fonts (web/NVS, applied at boot)
 static volatile bool         g_onBattery = false;                    // discharging (set on core 1, read on core 0)
 static volatile bool         g_rtcSyncPending = false;               // SNTP synced: RTC should be rewritten on core 1
@@ -314,6 +315,7 @@ static void loadSettings() {
     g_useGps           = p.getBool("usegps", false);
     g_trailLen         = p.getInt("traillen", 2);
     g_maxAc            = p.getInt("maxac", 20);
+    g_labelHideMin     = constrain(p.getInt("lblmin", 10), 0, 99);
     g_idleDimMs        = p.getUInt("idledim", IDLE_DIM_MS);
     g_fdSleep          = p.getBool("fdsleep", true);
     g_clockOn          = p.getBool("clock", true);
@@ -385,6 +387,20 @@ static void onRangeChange(float km) {
     radar::update(g_snap, g_settings);   // instant visual zoom from the last snapshot
     ui_set_range_km(km);
     ui_on_data_updated();
+}
+
+// The Settings page's "Military only" checkbox (boards with SETTINGS_PAGE; harmless elsewhere): the same setting
+// the config page has, done the same way, then a re-poll NOW so the scope changes within a fetch instead of after
+// the usual interval.
+static void onMilOnlyChange(bool on) {
+    g_milOnly = on;
+    g_adsb.setMilitaryOnly(on);
+    Preferences p;
+    p.begin("capsuleradar", false);
+    p.putBool("milonly", on);
+    p.end();
+    g_requeryKm = queryRadiusKm();
+    g_requery = true;
 }
 
 // Persist the visual theme in NVS (called when the user long-presses to switch).
@@ -621,6 +637,12 @@ static void handleRoot() {
     static const size_t BUFSZ = 16384;
     static char *buf = (char *)ps_malloc(BUFSZ);   // PSRAM: keep this big page buffer off the scarce
     if (!buf) return;                              //   internal heap (the contiguous RAM mbedTLS needs)
+    // The aircraft-text threshold, on boards that thin out the other aircraft's text while one is selected.
+    String lblRow;
+#if defined(LABELS_SELECTED_ONLY)
+    lblRow = String("<label>Selecting an aircraft hides the others' codes and altitudes, unless fewer than this many are on screen (0 = always hide)</label>"
+                    "<input type=number min=0 max=99 step=1 value='") + String(g_labelHideMin) + "' onchange='lh(this.value)'>";
+#endif
     const int len = snprintf(buf, BUFSZ,
         "<!DOCTYPE html><html><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -676,6 +698,7 @@ static void handleRoot() {
         "<label><input type=checkbox class=ck %s onchange='mo(this.checked)'>Military aircraft only</label>"
         "<label>Aircraft trails</label><select onchange='tl(this.value)'>%s</select>"
         "<label>Max aircraft on screen</label><select onchange='mx(this.value)'>%s</select>"
+        "%s"
         "<label><input type=checkbox class=ck %s onchange='bt(this.checked)'>Large text (restarts the device)</label>"
         "<label>Screen rotation (degrees clockwise)</label>"
         "<input type=number min=0 max=359 step=1 value='%d' onchange='ro(this.value)'>"
@@ -714,6 +737,7 @@ static void handleRoot() {
         "function mo(c){G('/milonly?v='+(c?1:0)+'&save=1')}"
         "function tl(v){G('/trail?v='+v+'&save=1')}"
         "function mx(v){G('/maxac?v='+v+'&save=1')}"
+        "function lh(v){G('/lblmin?v='+v+'&save=1')}"
         "function bt(c){G('/bigtext?v='+(c?1:0)+'&save=1')}"
         "function ro(v){G('/rotate?v='+v+'&save=1')}"
         "function u(v){G('/units?v='+v+'&save=1')}"
@@ -733,7 +757,7 @@ static void handleRoot() {
         tzopts.c_str(),
         g_brightnessDay, iopts.c_str(), g_clockOn ? "checked" : "", g_fdSleep ? "checked" : "", g_showSweep ? "checked" : "",
         g_showAirports ? "checked" : "", g_hideGround ? "checked" : "", maopts.c_str(), mbopts.c_str(), g_milOnly ? "checked" : "",
-        tlopts.c_str(), mxopts.c_str(), g_bigText ? "checked" : "", g_rotation, uopts.c_str(),
+        tlopts.c_str(), mxopts.c_str(), lblRow.c_str(), g_bigText ? "checked" : "", g_rotation, uopts.c_str(),
         g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
         g_settings.homeLat, g_settings.homeLon, (g_tz == TZ_STR ? 0 : 1));
     if (len >= (int)BUFSZ)   // truncated page = broken <script>; make it loud, not silent
@@ -971,6 +995,7 @@ static void handleMilOnly() {   // military-only feed filter (applies from the n
     if (g_web.hasArg("v")) {
         g_milOnly = g_web.arg("v").toInt() != 0;
         g_adsb.setMilitaryOnly(g_milOnly);
+        ui_set_military_only(g_milOnly);          // keep the Settings page's checkbox in step (a no-op on other boards)
         if (g_web.hasArg("save")) {
             Preferences p;
             p.begin("capsuleradar", false);
@@ -1047,6 +1072,21 @@ static void handleGround() {   // hide/show on-ground aircraft (applies from the
             Preferences p;
             p.begin("capsuleradar", false);
             p.putBool("hideground", g_hideGround);
+            p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
+static void handleLabelMin() {   // selecting an aircraft hides the others' code/altitude only at/above this many on screen (live)
+    if (refuseUnlessPageFetch()) return;
+    if (g_web.hasArg("v")) {
+        g_labelHideMin = constrain((int)g_web.arg("v").toInt(), 0, 99);
+        radar::setLabelHideMin(g_labelHideMin);
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            p.putInt("lblmin", g_labelHideMin);
             p.end();
         }
     }
@@ -1220,11 +1260,14 @@ void setup() {
 #endif
         radar::setTrailLength(g_trailLen);
         radar::setMaxOnScreen(g_maxAc);
+        radar::setLabelHideMin(g_labelHideMin);
         display::setRotation((uint16_t)g_rotation);
         g_rotation = display::rotation();
     }
     radar::setThemeChangedCb(saveTheme);
     ui_set_range_cb(onRangeChange);              // on-screen zoom button
+    ui_set_military_cb(onMilOnlyChange);         // the Settings page's "Military only" checkbox (no-op on boards without it)
+    ui_set_military_only(g_milOnly);             // ...showing the saved state
     ui_set_units(g_units);                       // apply saved unit preset
     ui_set_range_km(g_settings.rangeKm);         // show the loaded range
     // (power-off button: registered below, only when the PMIC actually answered)
@@ -1351,6 +1394,7 @@ void setup() {
     g_web.on("/milonly", handleMilOnly);
     g_web.on("/trail", handleTrail);
     g_web.on("/maxac", handleMaxAc);
+    g_web.on("/lblmin", handleLabelMin);
     g_web.on("/bigtext", handleBigText);
     g_web.on("/rotate", handleRotate);
     g_web.on("/poweroff", HTTP_POST, []() {
@@ -1498,9 +1542,13 @@ void loop() {
         ui_set_status(wifiUp, feedFresh, rssi, clk);
         char net[112];
         if (WiFi.status() == WL_CONNECTED)
+#if defined(STATS_NET_NO_GEO)
+            snprintf(net, sizeof(net), "Configure at\ncapsuleradar.local\n%s", WiFi.localIP().toString().c_str());
+#else
             // IP + the active centre point (helps users verify what actually got saved)
             snprintf(net, sizeof(net), "Configure at\ncapsuleradar.local\n%s  |  %.5f, %.5f",
                      WiFi.localIP().toString().c_str(), g_settings.homeLat, g_settings.homeLon);
+#endif
         else
             snprintf(net, sizeof(net), "WiFi setup:\njoin CapsuleRadar-Setup");
         ui_set_netinfo(net);

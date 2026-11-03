@@ -97,6 +97,7 @@ static bool       s_rangeLblVisible = true;
 static bool       s_sweepEnabled    = true;
 static bool       s_airportsEnabled = true;
 static int        s_maxOnScreen     = 20;          // how many (nearest) aircraft to draw (web-configurable)
+static int        s_labelHideMin    = 10;          // LABELS_SELECTED_ONLY: fewer aircraft on screen than this, and selecting one does not hide the others' text
 static bool       s_bigText         = false;       // accessibility: bigger glyph labels (set before init)
 static int        s_units    = 0;           // scope altitude labels: 0 = ft · 1 = m (setUnits)
 static int        s_trailMax        = TRAIL_MAX;   // per-aircraft trail length (0 = off)
@@ -547,11 +548,93 @@ static void clock_tick() {
     if (s_clockLayer && f.stage != 0) lv_obj_invalidate(s_clockLayer);
 }
 
+#if defined(SWEEP_GLOW)
+// ---- aircraft and airports glow as the sweep line passes over them (fork-only: boards that define SWEEP_GLOW) ----
+// A mark comes up to bright green over GLOW_RISE_MS as the sweep line crosses it, then fades back to its own
+// colour over GLOW_FADE_MS. Both are times, turned into degrees of sweep using the sweep's actual speed (the
+// compositor's, or LVGL's), so they stay right whatever that is. The brightness (a level, 0..GLOW_LEVELS) is
+// worked out here on every tick and the draw code only reads it, so every part of a repaint agrees. Only a mark
+// whose level changed is repainted, as a small box around it: cheap, even with many.
+#ifndef GLOW_RISE_MS
+#define GLOW_RISE_MS 300
+#endif
+#ifndef GLOW_FADE_MS
+#define GLOW_FADE_MS 3000
+#endif
+#ifndef GLOW_LEVELS
+#define GLOW_LEVELS 16
+#endif
+#define GLOW_COLOR    lv_color_hex(0x7CFFA8)    // bright green
+#define GLOW_HALO_OPA 110                       // the soft halo behind a mark, at full glow (out of 255)
+
+static std::vector<uint8_t> s_glowAc;           // per entry of s_acs: the level it is painted at
+static std::vector<uint8_t> s_glowAp;           // per airport inside the scope, in airports_visible_mark() order
+
+static float sweep_deg_now() { return (s_compConfig && s_compAngle) ? s_compAngle() : s_sweepDeg; }
+
+// Degrees of sweep per second at the speed the sweep is actually turning.
+static float sweep_dps() { return 360000.0f / (float)(s_compConfig ? SWEEP_COMP_PERIOD_MS : SWEEP_PERIOD_MS); }
+
+// d is the degrees of sweep since the line reached a mark at on-screen angle markDeg (both clockwise from 12
+// o'clock). The level comes up over riseDeg, then falls back to nothing over fadeDeg; it is zero for a mark the
+// line has yet to reach.
+static uint8_t glow_level(float markDeg, float sweepDeg, float riseDeg, float fadeDeg) {
+    float d = sweepDeg - markDeg;
+    d -= 360.0f * floorf(d / 360.0f);                           // 0 .. 360
+    float g;
+    if (d < riseDeg)                g = d / riseDeg;                         // coming on
+    else if (d < riseDeg + fadeDeg) g = 1.0f - (d - riseDeg) / fadeDeg;      // fading back
+    else                            return 0;
+    return (uint8_t)lroundf(g * (float)GLOW_LEVELS);
+}
+
+static void glow_box(lv_coord_t x, lv_coord_t y) {
+    lv_area_t a = { (lv_coord_t)(x - 18), (lv_coord_t)(y - 18), (lv_coord_t)(x + 18), (lv_coord_t)(y + 18) };
+    lv_obj_invalidate_area(s_acLayer, &a);
+}
+
+// Recompute every level; with paint, repaint the marks that changed. update() passes false: it repaints the whole layer.
+static void glow_step(bool paint = true) {
+    if (!s_acLayer) return;
+    const bool on = s_sweepEnabled && !orb() && s_clockStage == 0;   // no sweep line, no glow (everything fades back at once)
+    const bool vis = paint && lv_obj_is_visible(s_acLayer);
+    const float sweep = on ? sweep_deg_now() : 0.0f;
+    const float dps = sweep_dps();                                   // the rise and the fade are times: this makes them degrees
+    const float riseDeg = (float)GLOW_RISE_MS * dps / 1000.0f;
+    const float fadeDeg = (float)GLOW_FADE_MS * dps / 1000.0f;
+    if (s_glowAc.size() != s_acs.size()) s_glowAc.assign(s_acs.size(), 0);
+    for_each_drawn([&](size_t i, const AcDraw &ac) {
+        const uint8_t lvl = on ? glow_level(ac.scrDeg, sweep, riseDeg, fadeDeg) : 0;
+        if (lvl == s_glowAc[i]) return;
+        s_glowAc[i] = lvl;
+        if (vis) glow_box(ac.pos.x, ac.pos.y);
+    });
+#if defined(AIRPORT_SELECT)
+    const int na = s_airportsEnabled ? airports_visible_count() : 0;
+    if ((int)s_glowAp.size() != na) s_glowAp.assign((size_t)na, 0);
+    for (int k = 0; k < na; ++k) {
+        lv_point_t pt;
+        bool large;
+        if (!airports_visible_mark(k, &pt, &large)) continue;
+        float deg = atan2f((float)(pt.x - s_cx), (float)(s_cy - pt.y)) * 57.29578f;   // clockwise from 12 o'clock
+        if (deg < 0.0f) deg += 360.0f;
+        const uint8_t lvl = on ? glow_level(deg, sweep, riseDeg, fadeDeg) : 0;
+        if (lvl == s_glowAp[k]) continue;
+        s_glowAp[k] = lvl;
+        if (vis) glow_box(pt.x, pt.y);
+    }
+#endif
+}
+#endif
+
 static void sweep_timer_cb(lv_timer_t *t) {
     (void)t;
     if (++s_frameCtr % 3 == 0) interp_step();         // smooth glyph motion (~90 ms cadence)
 #if defined(SEL_FLASH_MS)
     if (s_frameCtr % 3 == 1) flash_step();            // the selected aircraft's pulsing ring (same ~90 ms cadence, offset one tick)
+#endif
+#if defined(SWEEP_GLOW)
+    glow_step();                                      // every tick (30 ms): the 300 ms attack needs finer steps than the ~90 ms the rest runs at; it only repaints marks whose level changed
 #endif
     clock_tick();                                      // before the Orb / sweep-off returns below
     if (orb()) {
@@ -662,8 +745,16 @@ static void draw_offrange(lv_draw_ctx_t *d, const AcDraw &ac) {
 static void ac_draw_cb(lv_event_t *e) {
     lv_draw_ctx_t *d = lv_event_get_draw_ctx(e);
     const bool drg = orb();
+#if defined(LABELS_SELECTED_ONLY)
+    // How many aircraft are on screen right now. With fewer than s_labelHideMin of them everyone keeps their code
+    // and altitude, selected or not: thinning the text out only helps once the scope is busy enough to need it.
+    int drawnCount = 0;
+    for_each_drawn([&](size_t, const AcDraw &) { ++drawnCount; });
+    const bool showAllText = drawnCount < s_labelHideMin;
+#endif
 
-    for_each_drawn([&](size_t, const AcDraw &ac) {
+    for_each_drawn([&](size_t ai, const AcDraw &ac) {
+        (void)ai;
         if (drg) {
             if (ac.inRange) {
                 draw_trail(d, ac, ORB_FLOW);
@@ -682,9 +773,29 @@ static void ac_draw_cb(lv_event_t *e) {
                 pts[i].x = (lv_coord_t)(ac.pos.x + (lv_coord_t)lroundf(x));
                 pts[i].y = (lv_coord_t)(ac.pos.y + (lv_coord_t)lroundf(y));
             }
+#if defined(SWEEP_GLOW)
+            // The sweep line has just passed this aircraft: a soft green halo behind it, and the glyph itself
+            // blends toward bright green, both fading as the line moves on (glow_step()). An emergency keeps its
+            // own white-and-red look, so nothing can mask it.
+            const uint8_t gl = (!ac.emergency && ai < s_glowAc.size()) ? s_glowAc[ai] : 0;
+            if (gl) {
+                lv_draw_rect_dsc_t hd;
+                lv_draw_rect_dsc_init(&hd);
+                hd.bg_color = GLOW_COLOR;
+                hd.bg_opa = dim((lv_opa_t)(gl * GLOW_HALO_OPA / GLOW_LEVELS));
+                hd.radius = LV_RADIUS_CIRCLE;
+                hd.border_width = 0;
+                lv_area_t ha = { (lv_coord_t)(ac.pos.x - 13), (lv_coord_t)(ac.pos.y - 13),
+                                 (lv_coord_t)(ac.pos.x + 13), (lv_coord_t)(ac.pos.y + 13) };
+                lv_draw_rect(d, &hd, &ha);
+            }
+            const lv_color_t body = gl ? lv_color_mix(GLOW_COLOR, ac.color, (uint8_t)(gl * 255 / GLOW_LEVELS)) : ac.color;
+#else
+            const lv_color_t body = ac.color;
+#endif
             lv_draw_rect_dsc_t g;
             lv_draw_rect_dsc_init(&g);
-            g.bg_color = ac.emergency ? COL_EMERG_CORE : ac.color;   // white core, see define
+            g.bg_color = ac.emergency ? COL_EMERG_CORE : body;   // white core, see define
             g.bg_opa = dim(LV_OPA_COVER);
             lv_draw_polygon(d, &g, pts, 4);
             if (ac.emergency) {
@@ -731,10 +842,11 @@ static void ac_draw_cb(lv_event_t *e) {
             lv_area_t a1 = { (lv_coord_t)(ac.pos.x + 12), (lv_coord_t)(ac.pos.y - 14),
                              (lv_coord_t)(ac.pos.x + 168), (lv_coord_t)(ac.pos.y + 4) };
 #if defined(LABELS_SELECTED_ONLY)
-            // With an aircraft selected only ITS flight code and altitude are drawn; with none selected, all of
-            // them. (The selection changes always repaint this whole layer, so the others' text vanishes/returns
-            // at once.) The name `showCall` covers both lines of text.
-            const bool showCall = s_selHex.empty() || s_selHex == ac.hex;
+            // With an aircraft selected only ITS flight code and altitude are drawn, but only once the scope is
+            // busy (at least s_labelHideMin aircraft on screen); a quiet scope keeps everyone's text. With none
+            // selected, all of it. (Selection changes always repaint this whole layer, so the others' text
+            // vanishes/returns at once.) The name `showCall` covers both lines of text.
+            const bool showCall = showAllText || s_selHex.empty() || s_selHex == ac.hex;
 #else
             const bool showCall = true;
 #endif
@@ -747,6 +859,39 @@ static void ac_draw_cb(lv_event_t *e) {
             if (showCall && ac.altTxt[0]) lv_draw_label(d, &la, &a2, ac.altTxt, NULL);   // altitude follows the flight code's rule
         }
     });
+#if defined(SWEEP_GLOW) && defined(AIRPORT_SELECT)
+    // Airports glow too: a green cross fades over the magenta one the map layer drew (same shape and size as
+    // airports_draw()), with the same soft halo behind it. It is drawn here, on the aircraft layer, so the
+    // static map layer never has to be repainted for it.
+    if (s_airportsEnabled && !drg) {
+        lv_draw_line_dsc_t cl;
+        lv_draw_line_dsc_init(&cl);
+        cl.color = GLOW_COLOR;
+        cl.width = 2;
+        cl.round_start = cl.round_end = 0;
+        lv_draw_rect_dsc_t hd;
+        lv_draw_rect_dsc_init(&hd);
+        hd.bg_color = GLOW_COLOR;
+        hd.radius = LV_RADIUS_CIRCLE;
+        hd.border_width = 0;
+        for (int k = 0; k < (int)s_glowAp.size(); ++k) {
+            const uint8_t gl = s_glowAp[k];
+            if (!gl) continue;
+            lv_point_t pt;
+            bool large;
+            if (!airports_visible_mark(k, &pt, &large)) continue;
+            const lv_coord_t r = large ? 7 : 5;
+            hd.bg_opa = dim((lv_opa_t)(gl * GLOW_HALO_OPA / GLOW_LEVELS));
+            lv_area_t ha = { (lv_coord_t)(pt.x - 12), (lv_coord_t)(pt.y - 12), (lv_coord_t)(pt.x + 12), (lv_coord_t)(pt.y + 12) };
+            lv_draw_rect(d, &hd, &ha);
+            cl.opa = dim((lv_opa_t)(gl * 255 / GLOW_LEVELS));
+            const lv_point_t h0 = { (lv_coord_t)(pt.x - r), pt.y }, h1 = { (lv_coord_t)(pt.x + r), pt.y };
+            const lv_point_t v0 = { pt.x, (lv_coord_t)(pt.y - r) }, v1 = { pt.x, (lv_coord_t)(pt.y + r) };
+            lv_draw_line(d, &cl, &h0, &h1);
+            lv_draw_line(d, &cl, &v0, &v1);
+        }
+    }
+#endif
 #if defined(AIRPORT_SELECT)
     // A selected airport gets the same pulsing circle a selected aircraft does (flash_step() repaints this area).
     int apIdx;
@@ -994,6 +1139,11 @@ void setTrailLength(int level) {
     else while ((int)s_flow.size() > s_flowMax) s_flow.pop_front();
     flow_redraw_all();                              // repaint the flow canvas at the new length
     if (s_acLayer) lv_obj_invalidate(s_acLayer);
+}
+
+void setLabelHideMin(int n) {
+    s_labelHideMin = (n < 0) ? 0 : (n > 99 ? 99 : n);
+    if (s_acLayer) lv_obj_invalidate(s_acLayer);   // the text on screen may change right now
 }
 
 void setMaxOnScreen(int n) {
@@ -1254,6 +1404,10 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
     s_animStartMs  = now;
 
     s_acs = std::move(out);
+#if defined(SWEEP_GLOW)
+    s_glowAc.assign(s_acs.size(), 0);
+    glow_step(false);                                 // levels for the new list now, so nothing flickers dark when the layer repaints just below
+#endif
     if (s_acLayer) lv_obj_invalidate(s_acLayer);
 }
 
